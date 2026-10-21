@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail          JSONB
 );
 
+CREATE TABLE IF NOT EXISTS thread_meta (
+    thread_id       TEXT PRIMARY KEY,
+    hidden          BOOLEAN NOT NULL DEFAULT false,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS alerts (
     id              BIGSERIAL PRIMARY KEY,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -151,3 +157,32 @@ async def log_alert(key: str, message: str, delivered: bool) -> None:
             )
     except Exception:
         log.exception("failed to log alert")
+
+
+async def list_threads(prefixes: tuple[str, ...], limit: int = 100) -> list[dict[str, Any]]:
+    """Threads seen in the decision log (newest activity first), minus ones hidden since their last message."""
+    async with get_pool().connection() as conn:
+        cur = await conn.execute(
+            """SELECT d.thread_id, max(d.created_at) AS updated_at,
+                      (array_agg(d.redacted_text ORDER BY d.id)
+                       FILTER (WHERE btrim(coalesce(d.redacted_text, '')) <> ''))[1] AS first_text
+               FROM decisions d
+               LEFT JOIN thread_meta m ON m.thread_id = d.thread_id
+               WHERE d.thread_id LIKE ANY(%s)
+               GROUP BY d.thread_id
+               -- hidden only until the thread has newer activity (from any channel)
+               HAVING NOT (bool_or(coalesce(m.hidden, false)) AND max(m.updated_at) >= max(d.created_at))
+               ORDER BY updated_at DESC
+               LIMIT %s""",
+            ([f"{p}%" for p in prefixes], limit),
+        )
+        return await cur.fetchall()
+
+
+async def set_thread_hidden(thread_id: str, hidden: bool) -> None:
+    async with get_pool().connection() as conn:
+        await conn.execute(
+            """INSERT INTO thread_meta (thread_id, hidden) VALUES (%s, %s)
+               ON CONFLICT (thread_id) DO UPDATE SET hidden = EXCLUDED.hidden, updated_at = now()""",
+            (thread_id, hidden),
+        )

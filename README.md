@@ -44,6 +44,8 @@ curl -N -H "Authorization: Bearer $T" -H 'Accept: text/event-stream' -H 'Content
 - `GET /api/agent/runs/{id}/stream?token=` streams events for EventSource and supports `Last-Event-ID`.
 - `POST /api/agent/runs/{id}/cancel` cancels a run.
 - `GET /api/agent/threads/{tid}` returns the thread history.
+- `GET /api/agent/threads` lists your chats, newest first, built from the decision log. `line` is your LINE thread.
+- `DELETE /api/agent/threads/{tid}` hides a chat from the list until its next message. The history is kept.
 
 SSE event types: `decision`, `token`, `tool`, `status`, `done`, `error`, `cancelled`.
 

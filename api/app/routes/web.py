@@ -14,15 +14,36 @@ from .. import config, db, pipeline, state
 from ..auth import require_owner
 from ..graphs.main import build_graph
 from ..models import Job, KillSwitch, Override
+from ..settings import get_settings
 
 router = APIRouter(prefix="/api/agent")
 _THREAD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+LINE_TID = "line"   # the owner's LINE thread, exposed without leaking the LINE user id
+_OVERRIDE_PREFIX = re.compile(r"^/(local|cloud|code)\s+", re.I)
+
+
 def _thread_id(tid: str) -> str:
+    if tid == LINE_TID:
+        uid = get_settings().line_owner_user_id
+        if not uid:
+            raise HTTPException(404, "LINE is not configured")
+        return f"line:{uid}"
     if not _THREAD_RE.match(tid):
         raise HTTPException(400, "thread id must match [A-Za-z0-9_-]{1,64}")
     return f"web:{tid}"
+
+
+def _public_tid(thread_id: str) -> str:
+    return LINE_TID if thread_id.startswith("line:") else thread_id.removeprefix("web:")
+
+
+def _thread_title(thread_id: str, first_text: str | None) -> str:
+    if thread_id.startswith("line:"):
+        return "LINE"
+    title = _OVERRIDE_PREFIX.sub("", (first_text or "").strip())
+    return " ".join(title.split())[:30] or "(untitled)"
 
 
 class RunRequest(BaseModel):
@@ -105,6 +126,25 @@ def _serialize(m: Any) -> dict[str, Any] | None:
     if isinstance(m, ToolMessage):
         return {"id": m.id, "role": "tool", "name": m.name, "content": str(m.content)[:500]}
     return None
+
+
+@router.get("/threads")
+async def list_threads(owner: str = Depends(require_owner)):
+    prefixes = ("web:",)
+    if uid := get_settings().line_owner_user_id:
+        prefixes += (f"line:{uid}",)
+    rows = await db.list_threads(prefixes)
+    return {"threads": [{"id": _public_tid(r["thread_id"]),
+                         "title": _thread_title(r["thread_id"], r["first_text"]),
+                         "channel": r["thread_id"].split(":", 1)[0],
+                         "updated_at": r["updated_at"].isoformat()} for r in rows]}
+
+
+@router.delete("/threads/{tid}")
+async def hide_thread(tid: str, owner: str = Depends(require_owner)):
+    """Remove from the list only; the history stays and any new message brings it back."""
+    await db.set_thread_hidden(_thread_id(tid), True)
+    return {"ok": True}
 
 
 @router.get("/threads/{tid}")
