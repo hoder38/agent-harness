@@ -43,6 +43,27 @@ def trim_history(messages: list[AnyMessage], max_turns: int) -> list[AnyMessage]
     return messages[human_idx[-max_turns]:]
 
 
+OLD_TOOL_RESULT_MAX = 300
+
+
+def stub_old_tool_results(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Replace large tool results from earlier turns with a short stub (the current turn keeps full results).
+
+    Only the model input shrinks; the checkpointed thread keeps everything.
+    """
+    human_idx = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if not human_idx:
+        return messages
+    cur = human_idx[-1]
+    out: list[AnyMessage] = []
+    for i, m in enumerate(messages):
+        if i < cur and isinstance(m, ToolMessage) and len(str(m.content)) > OLD_TOOL_RESULT_MAX:
+            m = m.model_copy(update={"content": f"[{m.name or 'tool'} result from an earlier turn omitted; "
+                                                "call the tool again if you need it]"})
+        out.append(m)
+    return out
+
+
 def repair_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
     """Answer any tool call that never got a result (tool-less route, cancel, crash).
 
@@ -73,7 +94,7 @@ def build_graph(
     async def agent(state: MessagesState) -> dict[str, Any]:
         if bound is None:
             raise RuntimeError("graph built without a model (read-only)")
-        msgs = [SystemMessage(system), *repair_tool_calls(trim_history(state["messages"], max_turns))]
+        msgs = [SystemMessage(system), *repair_tool_calls(stub_old_tool_results(trim_history(state["messages"], max_turns)))]
         return {"messages": [await bound.ainvoke(msgs)]}
 
     g = StateGraph(MessagesState)
