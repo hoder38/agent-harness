@@ -2,7 +2,7 @@
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -43,6 +43,23 @@ def trim_history(messages: list[AnyMessage], max_turns: int) -> list[AnyMessage]
     return messages[human_idx[-max_turns]:]
 
 
+def repair_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Answer any tool call that never got a result (tool-less route, cancel, crash).
+
+    Cloud APIs reject the whole history with a 400 if one tool call is left unanswered,
+    which would otherwise poison the thread forever.
+    """
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    out: list[AnyMessage] = []
+    for m in messages:
+        out.append(m)
+        if isinstance(m, AIMessage):
+            for tc in m.tool_calls:
+                if tc.get("id") and tc["id"] not in answered:
+                    out.append(ToolMessage("(tool not executed)", tool_call_id=tc["id"], name=tc.get("name")))
+    return out
+
+
 def build_graph(
     llm: BaseChatModel | None,
     tools: list,
@@ -56,7 +73,7 @@ def build_graph(
     async def agent(state: MessagesState) -> dict[str, Any]:
         if bound is None:
             raise RuntimeError("graph built without a model (read-only)")
-        msgs = [SystemMessage(system), *trim_history(state["messages"], max_turns)]
+        msgs = [SystemMessage(system), *repair_tool_calls(trim_history(state["messages"], max_turns))]
         return {"messages": [await bound.ainvoke(msgs)]}
 
     g = StateGraph(MessagesState)
