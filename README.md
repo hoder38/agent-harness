@@ -51,6 +51,12 @@ SSE event types: `decision`, `token`, `tool`, `status`, `done`, `error`, `cancel
 - Routing overrides: `/local`, `/cloud`, `/code` (strong model). Private content is detected automatically (PII/secrets/keywords) and stays local.
 - Owner commands: `/stop cloud|all`, `/resume`, `/status`.
 
+**Web tools** (chat/assistant routes; never on PRIVATE threads)
+- `web_search` uses the Brave Search API and needs `BRAVE_API_KEY`; without the key it is not offered.
+- `fetch_page` can read any public URL through squid port 4751. Private, LAN, docker and metadata IPs are blocked on both ports. Port 4750 still enforces the allowlist.
+- Fetched content is wrapped in `<untrusted>` tags, capped at 2 MB download and 8000 chars of text.
+- Low-confidence messages are routed to `clarify`, which has no tools. Ask explicitly ("search the web for …") if needed.
+
 **Host controls**
 - `host/killswitch.sh off|cloud|all`
 - `host/gpu-state.sh IDLE|GAMING`
@@ -92,7 +98,7 @@ docker run --rm -v $PWD:/app -w /app/api agent-harness-api-test python -m pytest
 - SSE streaming with tool calls.
 - Cancel.
 - Thread survives an agent-api restart.
-- Squid blocks non-allowlisted domains (403) and agents have no direct egress.
+- Squid blocks non-allowlisted domains (403) and agents have no direct egress. The fetch_page port (4751) allows public hosts but returns 403 for private and internal IPs.
 - Kill switch overrides `/cloud`.
 - The alert watcher records stopped or unhealthy containers.
 

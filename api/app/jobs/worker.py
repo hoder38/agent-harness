@@ -111,9 +111,10 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     started = time.monotonic()
     try:
         llm = make_llm(model, ks)
+        tools = tools_for(route, private=decision.private)
         graph = build_graph(
-            llm, tools_for(route),
-            system=system_prompt(route, job.channel, model),
+            llm, tools,
+            system=system_prompt(route, job.channel, model, web=any(t.name == "fetch_page" for t in tools)),
             max_turns=int(ex.get("max_history_turns", 20)),
             checkpointer=ctx["checkpointer"],
         )

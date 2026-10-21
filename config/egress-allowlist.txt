@@ -1,6 +1,8 @@
 # Squid dstdomain allowlist (leading dot = domain + subdomains). Everything else is denied and logged.
 # TypeSafe (Jev router)
 .typesafe.ai
+# Web search tool (fetch_page uses the separate open port 4751)
+api.search.brave.com
 # LLM providers
 api.openai.com
 api.anthropic.com

@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.tools import tool
 
+from ..settings import get_settings
+
 
 @tool
 def get_current_time(timezone: str = "Asia/Taipei") -> str:
@@ -21,7 +23,16 @@ ROUTE_TOOLS = {
     "clarify": [],
     "coding": [],
 }
+WEB_ROUTES = {"chat", "assistant"}
 
 
-def tools_for(route: str) -> list:
-    return ROUTE_TOOLS.get(route, [])
+def tools_for(route: str, *, private: bool = False) -> list:
+    tools = list(ROUTE_TOOLS.get(route, []))
+    # Web tools send text off the machine, so PRIVATE threads never get them.
+    if route in WEB_ROUTES and not private:
+        from .web import fetch_page, web_search
+
+        if get_settings().brave_api_key:
+            tools.append(web_search)
+        tools.append(fetch_page)
+    return tools

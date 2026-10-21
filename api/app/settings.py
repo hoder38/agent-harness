@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     typesafe_api_key: str = ""
     jev_model: str = "jev-latest"
 
+    brave_api_key: str = ""
+    fetch_proxy: str = "http://egress-proxy:4751"   # open-egress squid port (private IPs blocked) for fetch_page
+
     owner_id: str = "owner"
     agent_jwt_secret: str = "change-me"
     jwt_issuer: str = "nodereact"

@@ -18,10 +18,16 @@ ROUTE_HINTS = {
 }
 
 
-def system_prompt(route: str, channel: str, model: str) -> str:
+WEB_HINT = ("You can search the web with web_search and read a page with fetch_page. Use them for current "
+            "events, recent or uncertain facts; don't search for things you already know. Cite the URLs you used.")
+
+
+def system_prompt(route: str, channel: str, model: str, *, web: bool = False) -> str:
     parts = [BASE_SYSTEM]
     if hint := ROUTE_HINTS.get(route):
         parts.append(hint)
+    if web:
+        parts.append(WEB_HINT)
     if channel == "line":
         parts.append("Reply in plain text (no markdown), concise, at most a few short paragraphs.")
     if model == "local_cpu":
