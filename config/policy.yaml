@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: "2026-10-20.1"
+version: "2026-10-21.1"
 
 thresholds:
   clarify_below: 0.5      # intent confidence < this -> route=clarify
@@ -22,7 +22,7 @@ alert_budget_fraction: 0.8        # LINE alert at this fraction; killswitch=clou
 prices_usd_per_mtok:
   local: { input: 0, output: 0 }
   local_cpu: { input: 0, output: 0 }
-  cloud_fast: { input: 0.25, output: 2.0 }
+  cloud_fast: { input: 0.10, output: 0.50 }
   cloud_strong: { input: 3.0, output: 15.0 }
 
 router:
