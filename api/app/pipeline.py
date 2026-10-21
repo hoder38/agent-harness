@@ -1,0 +1,116 @@
+"""L1→L7: dedupe, owner commands, Gate 0/1/2, decide, log, enqueue."""
+import logging
+import re
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
+
+from . import config, db, state
+from .decision import decide
+from .gates.gate0 import gate0
+from .gates.gate1_qwen import gate1
+from .gates.jev_router import route
+from .models import Decision, Job
+
+log = logging.getLogger(__name__)
+
+Enqueue = Callable[[str, dict[str, Any], str, str], Awaitable[None]]  # (fn, payload, job_id, queue_name)
+
+_COMMAND_RE = re.compile(r"^\s*/(stop)\s+(cloud|all)\s*$|^\s*/(resume)\s*$|^\s*/(status)\s*$", re.IGNORECASE)
+
+
+@dataclass
+class SubmitResult:
+    duplicate: bool = False
+    command_reply: str | None = None
+    run_id: str | None = None
+    decision: Decision | None = None
+    reasons: list[str] = field(default_factory=list)
+
+
+async def handle_command(text: str, *, source: str) -> str | None:
+    """Owner-only kill switch commands: /stop cloud, /stop all, /resume, /status."""
+    m = _COMMAND_RE.match(text or "")
+    if not m:
+        return None
+    r = state.get_redis()
+    if m.group(1):
+        new = m.group(2).lower()
+        await state.set_killswitch(r, new)  # type: ignore[arg-type]
+        await db.audit("killswitch", new, {"source": source})
+        return f"🛑 Kill switch = {new}. " + ("Cloud model calls blocked." if new == "cloud" else "Cloud blocked and background queues paused.")
+    if m.group(3):
+        await state.set_killswitch(r, "off")
+        await db.audit("killswitch", "off", {"source": source})
+        return "▶️ Kill switch off. Normal operation resumed."
+    ks = await state.get_killswitch(r)
+    gpu = await state.get_gpu_state(r)
+    b = await state.get_budget(r, config.policy())
+    spend = ", ".join(f"{p} ${b.spend_usd.get(p, 0):.2f}/${lim:.2f}" for p, lim in b.limits_usd.items())
+    return f"killswitch={ks} gpu={gpu} spend today: {spend}"
+
+
+async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None = None) -> SubmitResult:
+    r = state.get_redis()
+    if not await state.dedupe(r, job.dedupe_key):
+        return SubmitResult(duplicate=True)
+
+    if reply := await handle_command(job.text or "", source=job.channel):
+        return SubmitResult(command_reply=reply)
+
+    t0 = time.monotonic()
+    pol = config.policy()
+    gpu, ks = await state.get_gpu_state(r), await state.get_killswitch(r)
+    budget = await state.get_budget(r, pol)
+
+    g0 = gate0(job, config.privacy_rules(), thread_private=await state.is_thread_private(r, job.thread_id))
+    if g0.privacy_tag is None:
+        g1 = await gate1(g0.text)  # deferred stub → None
+        g0.privacy_tag = "PRIVATE" if g1 else "NORMAL"
+    private = g0.privacy_tag == "PRIVATE"
+    if private:
+        await state.mark_thread_private(r, job.thread_id)
+
+    router = await route(
+        text=g0.text, redacted_text=g0.redacted_text, private=private,
+        gpu_state=gpu, killswitch=ks, policy=pol,
+    )
+    decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks)
+    decision.reasons = g0.reasons + decision.reasons
+    latency = int((time.monotonic() - t0) * 1000)
+
+    run_id = uuid.uuid4().hex
+    await db.log_decision(
+        job_id=job.id, run_id=run_id, thread_id=job.thread_id, channel=job.channel, mode=job.mode,
+        redacted_text=g0.redacted_text,
+        inputs={
+            "job": job.model_dump(mode="json", exclude={"text"}),
+            "gate0": g0.model_dump(mode="json", exclude={"text"}),
+            "gpu_state": gpu, "budget": budget.model_dump(), "killswitch": ks,
+        },
+        router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),
+        decision=decision.model_dump(), latency_ms=latency,
+    )
+
+    # Non-private threads may later be continued on a cloud model, so they only ever store redacted
+    # text. PRIVATE threads are pinned to local models (sticky), so they keep the original.
+    model_text = g0.text if private else g0.redacted_text
+    if delivery and decision.queue != "interactive":
+        # The channel acks immediately with the reply token; the result is pushed later.
+        delivery = {**delivery, "reply_token": None}
+    payload = {
+        "run_id": run_id,
+        "job": job.model_dump(mode="json"),
+        "text": model_text,
+        "decision": decision.model_dump(),
+        "intent": router.intent,
+        "delivery": delivery or {},
+    }
+    queue_cfg = pol.get("queues", {}).get(decision.queue, {})
+    queue_name = queue_cfg.get("name", f"arq:{decision.queue}")
+    await state.set_run_meta(r, run_id, thread_id=job.thread_id, queue=queue_name, status="queued",
+                             channel=job.channel)
+    await state.emit(r, run_id, "decision", {**decision.model_dump(), "router": router.source, "latency_ms": latency})
+    await enqueue("run_agent", payload, run_id, queue_name)
+    return SubmitResult(run_id=run_id, decision=decision)

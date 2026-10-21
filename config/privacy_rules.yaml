@@ -1,0 +1,17 @@
+# Gate 0 source tagging. Content from any of these sources is PRIVATE (local models only).
+private_sources:
+  - mail
+  - calendar
+  - finance
+  - private_dir        # ~/private
+  - personal_notes
+  - vault_private      # vault notes with frontmatter privacy: private
+
+# Extra regexes (added to the built-in secret/PII patterns in app/gates/gate0.py).
+# kind: secret | pii   private: true marks the whole message PRIVATE instead of just redacting.
+extra_patterns: []
+#  - { name: tw_bank_account, kind: pii, regex: '\b\d{3}-\d{2}-\d{6,8}\b', private: true }
+
+# Keywords that mark a message PRIVATE outright (case-insensitive substring match).
+private_keywords: []
+#  - "my salary"

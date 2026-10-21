@@ -1,0 +1,53 @@
+# Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
+# review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
+version: "2026-10-20.1"
+
+thresholds:
+  clarify_below: 0.5      # intent confidence < this -> route=clarify
+  bump_below: 0.8         # confidence in [clarify_below, bump_below) -> bump tier one level
+  heavy: 0.6              # code_multi / long_ctx above this -> cloud_strong
+  risky: 0.5              # router risky above this -> risky=True
+
+# Daily USD budget per provider (LiteLLM spend tracked by the harness).
+budgets_usd_daily:
+  openai: 5.0
+  anthropic: 5.0
+providers:                # model alias -> provider (for budget accounting)
+  cloud_fast: openai
+  cloud_strong: anthropic
+background_budget_fraction: 0.5   # background jobs avoid cloud_strong above this spend fraction
+alert_budget_fraction: 0.8        # LINE alert at this fraction; killswitch=cloud at 1.0
+
+# USD per 1M tokens, used to estimate spend from usage metadata. Fill in to match litellm.yaml models.
+prices_usd_per_mtok:
+  local: { input: 0, output: 0 }
+  local_cpu: { input: 0, output: 0 }
+  cloud_fast: { input: 0.25, output: 2.0 }
+  cloud_strong: { input: 3.0, output: 15.0 }
+
+router:
+  jev_timeout_s: 2.0
+  qwen_timeout_s: 20.0
+  cloud_router_timeout_s: 10.0
+  rule_confidence: 0.6
+
+executor:
+  recursion_limit: 25
+  max_history_turns: 20          # keep last N user turns in the model context
+  line_max_chars: 4500
+  line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry
+  private_line_notice: "🔒 The answer contains private data. Open the web app to read it."
+
+queues:
+  interactive: { name: "arq:interactive", timeout_s: 300 }
+  background: { name: "arq:background", timeout_s: 1800 }
+  coding: { name: "arq:background", timeout_s: 1800 }   # coding route is phase 5; runs as background chat for now
+  media: { name: "arq:background", timeout_s: 1800 }
+
+heavy_media_kinds: [video, large_doc]
+defer_recheck_s: 300
+gpu_concurrency: 2
+
+alerts:
+  dedupe_s: 3600
+  queue_age_s: 300

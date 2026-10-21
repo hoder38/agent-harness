@@ -1,0 +1,194 @@
+name: agent-harness
+
+# MVP = phases 1, 2, 3 + 8 (ARCHITECTURE.md §15). Later phases add media-worker, gpu-governor,
+# sandbox-manager, socket-proxy-rw and syncthing.
+
+x-proxy-env: &proxy-env
+  HTTP_PROXY: http://egress-proxy:4750
+  HTTPS_PROXY: http://egress-proxy:4750
+  http_proxy: http://egress-proxy:4750
+  https_proxy: http://egress-proxy:4750
+  NO_PROXY: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,localhost,127.0.0.1,0.0.0.0
+  no_proxy: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,localhost,127.0.0.1,0.0.0.0
+
+x-app-env: &app-env
+  <<: *proxy-env
+  DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD:?}@agent-postgres:5432/agent
+  REDIS_URL: redis://:${REDIS_PASSWORD:?}@agent-redis:6379/0
+  LITELLM_BASE_URL: http://litellm:4000/v1
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?}
+  TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+  OWNER_ID: ${OWNER_ID:?}
+  AGENT_JWT_SECRET: ${AGENT_JWT_SECRET:?}
+  HARNESS_TOKEN: ${HARNESS_TOKEN:?}
+  LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET:-}
+  LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+  LINE_OWNER_USER_ID: ${LINE_OWNER_USER_ID:-}
+  DOCKER_HOST: http://socket-proxy-ro:2375
+  POLICY_PATH: /config/policy.yaml
+  PRIVACY_RULES_PATH: /config/privacy_rules.yaml
+  PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:6006
+  TZ: Asia/Taipei
+
+x-app: &app
+  build: ./api
+  image: agent-harness-api:latest
+  environment: *app-env
+  volumes: ["./config:/config:ro"]
+  restart: unless-stopped
+  networks: [agent]
+  depends_on:
+    agent-postgres: { condition: service_healthy }
+    agent-redis: { condition: service_healthy }
+
+services:
+  agent-api:
+    <<: *app
+    ports: ["127.0.0.1:8100:8000"]          # host-only (hooks, MCP, host scripts)
+    networks: [agent, edge]                  # edge = nodeReact nginx network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  agent-worker:                              # interactive queue
+    <<: *app
+    command: ["arq", "worker.Settings"]
+    healthcheck:
+      test: ["CMD", "arq", "--check", "worker.Settings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  agent-worker-bg:                           # background / coding / media queue
+    <<: *app
+    command: ["arq", "worker.BackgroundSettings"]
+    healthcheck:
+      test: ["CMD", "arq", "--check", "worker.BackgroundSettings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  agent-scheduler:                           # cron: health/budget watcher → LINE alerts
+    <<: *app
+    command: ["arq", "worker.CronSettings"]
+    healthcheck:
+      test: ["CMD", "arq", "--check", "worker.CronSettings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      <<: *proxy-env                         # model pulls go through the allowlist proxy
+      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_CONTEXT_LENGTH: "32768"
+    volumes: [ollama:/root/.ollama]
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }
+    restart: unless-stopped
+    networks: [agent]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  agent-postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: agent
+    volumes: [pg:/var/lib/postgresql/data]
+    restart: unless-stopped
+    networks: [agent]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  agent-redis:
+    image: redis:8
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?}", "--appendonly", "yes"]
+    volumes: [redis:/data]
+    restart: unless-stopped
+    networks: [agent]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./config/litellm.yaml:/app/config.yaml:ro
+      - ./config/litellm_hooks.py:/app/litellm_hooks.py:ro
+    environment:
+      <<: *proxy-env
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOCAL_MODEL: ${LOCAL_MODEL:-ollama_chat/qwen3.5:9b}
+      CLOUD_FAST_MODEL: ${CLOUD_FAST_MODEL:?}
+      CLOUD_STRONG_MODEL: ${CLOUD_STRONG_MODEL:?}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@agent-redis:6379/0
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+    restart: unless-stopped
+    networks: [agent]
+    depends_on:
+      agent-redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports: ["127.0.0.1:6006:6006"]           # UI host-only; OTLP http on 6006, grpc on 4317
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    volumes: [phoenix:/mnt/data]
+    restart: unless-stopped
+    networks: [agent, hostonly]
+
+  egress-proxy:                              # squid with a dstdomain allowlist; only service with internet
+    image: ubuntu/squid:latest
+    volumes:
+      - ./config/squid.conf:/etc/squid/squid.conf:ro
+      - ./config/egress-allowlist.txt:/etc/squid/allowlist.txt:ro
+    restart: unless-stopped
+    networks: [agent, egress]
+
+  socket-proxy-ro:                           # read-only Docker API for the health watcher
+    image: tecnativa/docker-socket-proxy:latest
+    environment: { CONTAINERS: "1", EVENTS: "1", POST: "0" }
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    restart: unless-stopped
+    networks: [agent]
+
+volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {} }
+
+networks:
+  agent: { internal: true }
+  egress: {}
+  hostonly:                                  # publish host ports without giving outbound internet
+    driver: bridge
+    driver_opts: { com.docker.network.bridge.enable_ip_masquerade: "false" }
+  edge: { external: true, name: anomopi_default }   # nodeReact (compose project "anomopi") nginx network

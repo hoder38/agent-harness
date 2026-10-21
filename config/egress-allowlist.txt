@@ -1,0 +1,24 @@
+# Squid dstdomain allowlist (leading dot = domain + subdomains). Everything else is denied and logged.
+# TypeSafe (Jev router)
+.typesafe.ai
+# LLM providers
+api.openai.com
+api.anthropic.com
+# LINE
+api.line.me
+api-data.line.me
+# Ollama registry (model pulls)
+registry.ollama.ai
+ollama.com
+.r2.cloudflarestorage.com
+# Hugging Face (model downloads; can be removed after setup)
+.huggingface.co
+.hf.co
+# GitHub / Copilot (phase 5 sandboxes) — VERIFY full Copilot endpoint list
+github.com
+api.github.com
+.githubcopilot.com
+# Package registries (sandboxes)
+registry.npmjs.org
+pypi.org
+files.pythonhosted.org

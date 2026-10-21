@@ -1,0 +1,37 @@
+# LiteLLM proxy: the harness only calls http://litellm:4000/v1 with model=<alias>.
+# Privacy rule: fallbacks never route local <-> cloud. Privacy is decided upstream.
+model_list:
+  - model_name: local
+    litellm_params:
+      model: os.environ/LOCAL_MODEL            # e.g. ollama_chat/qwen3.5:9b (no q6_K tag exists upstream)
+      api_base: http://ollama:11434
+      keep_alive: 10m
+  - model_name: local_cpu
+    litellm_params:
+      model: os.environ/LOCAL_MODEL
+      api_base: http://ollama:11434
+      num_gpu: 0                               # VERIFY: forwarded to Ollama options
+  - model_name: cloud_fast
+    litellm_params:
+      model: os.environ/CLOUD_FAST_MODEL       # e.g. openai/gpt-6-luna
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: cloud_strong
+    litellm_params:
+      model: os.environ/CLOUD_STRONG_MODEL     # e.g. anthropic/claude-sonnet-5-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  fallbacks:
+    - { cloud_strong: [cloud_fast] }
+    - { cloud_fast: [cloud_strong] }
+  num_retries: 2
+  timeout: 120
+
+litellm_settings:
+  drop_params: true
+  callbacks: litellm_hooks.proxy_handler_instance   # killswitch backstop (config/litellm_hooks.py)
+  max_budget: 10            # VERIFY: global daily USD hard cap
+  budget_duration: 1d
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
