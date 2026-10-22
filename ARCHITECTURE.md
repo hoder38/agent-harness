@@ -176,6 +176,9 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
 
 ### Gate 0 — deterministic (pure code, must be < 5 ms)
 - Honour user override (`/local`, `/cloud`, `/code`).
+- Owner commands are handled before Gate 0 (`pipeline.handle_command`), never reach a model, and reply in English:
+  `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other leading `/word` (e.g. `/new`) replies "Unknown command" + the
+  `/help` list. Paths such as `/etc/hosts …` are not commands.
 - Secret/PII regex scan (API keys, tokens, private keys, ID numbers, card numbers, phone, email). Redact for any non-local use.
 - **Source tags:** content originating from mail, calendar, finance docs, `~/private`, personal notes ⇒ `privacy_tag=PRIVATE`.
 - Budget check (daily $ per provider, Copilot AI credits).
@@ -208,8 +211,15 @@ questions = {
   "risky": Noul(instructions="Implies destructive, external, or money-related action"),
   "long_ctx": Noul(instructions="Requires reading many files or very long documents"),
   "code_multi": Noul(instructions="Requires changing code across multiple files"),
+  "ambiguous": Noul(instructions="Refers to something by a pronoun or vague word (that, it, 那個, 它) "
+                                 "whose meaning is not given in the message or the previous message"),
 }
 ```
+Router input is `[Previous message] … \n[Current message] …` when the thread had a message within
+`clarify.previous_ttl_s` (Redis `prevmsg:{thread_id}`), so follow-ups are not judged ambiguous on their own.
+`ambiguous` wording was calibrated on Jev (2026-10-22): broader "missing time/place/version" phrasing scored most
+ordinary questions > 0.7; the referent-only wording scores vague messages ~0.95 and clear ones ≤ 0.55.
+The Qwen/cloud JSON router returns the same field; the rule router sets 0.
 **VERIFY** exact SDK class names (sync/async client) and response field names in `typesafe-sdk`.
 On Jev error/timeout (> 2 s): fall back to Qwen router; if GAMING, fall back to a cheap cloud model router (non-private only).
 
@@ -224,7 +234,7 @@ def decide(job, gate0, router, gpu_state, budget) -> Decision:
     # 2. PRIVATE  → model must be local
     #       if gpu_state == GAMING: routing = rule-based (§6, no model call);
     #       execution: interactive → local_cpu (warn, short answers); background → defer until FREE
-    # 3. intent confidence < 0.8 → route="clarify" on a LOCAL model (local_cpu if GPU BUSY/GAMING);
+    # 3. intent confidence < 0.8 OR router.ambiguous > 0.7 → route="clarify" on a LOCAL model (local_cpu if GPU BUSY/GAMING);
     #    no tier bump — never pay a cloud model to ask a question. /cloud override and PRIVATE keep their model.
     #    The answer is re-routed together with the original request + question (§12a MVP), so the tier
     #    (and any escalation) is decided once the intent is clear. After 5 clarify rounds → answer with assumptions.
@@ -426,7 +436,7 @@ PRIVATE threads never use web tools; they may cite only the local knowledge base
 
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:
-- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (confidence < `clarify_below` 0.8) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (5) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
+- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.8, or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (5) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
 - **Prompt rules:** `GROUNDING_WEB` (one primary source read with `fetch_page`, `[n]` citations, "(unverified)"/「（未驗證）」 labels, exempt kinds) or `GROUNDING_OFFLINE` (no invented sources; one "⚠️ 未驗證" line) on every non-clarify route; the clarify hint asks one question with ≤ 3 options.
 - **Tool caps:** `policy.yaml tool_limits` (`web_search: 3`, `fetch_page: 4`) per user turn; calls over the cap get an error `ToolMessage` without running.
 

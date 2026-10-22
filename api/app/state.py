@@ -155,6 +155,18 @@ async def clear_clarify_ctx(r: aioredis.Redis, thread_id: str) -> None:
     await r.delete(f"clarify:{thread_id}")
 
 
+# The previous user message is sent to the router as context, so follow-ups ("how much is it?")
+# are not judged ambiguous on their own.
+async def get_prev_msg(r: aioredis.Redis, thread_id: str) -> dict[str, str] | None:
+    return await r.hgetall(f"prevmsg:{thread_id}") or None
+
+
+async def set_prev_msg(r: aioredis.Redis, thread_id: str, *, text: str, redacted_text: str, ttl_s: int) -> None:
+    key = f"prevmsg:{thread_id}"
+    await r.hset(key, mapping={"text": text, "redacted_text": redacted_text})
+    await r.expire(key, ttl_s)
+
+
 # ---------------------------------------------------------------- GPU semaphore (crash-safe: entries expire)
 class GpuSemaphore:
     KEY = "sem:gpu"

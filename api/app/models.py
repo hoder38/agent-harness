@@ -55,6 +55,7 @@ class RouterResult(BaseModel):
     risky: float = 0.0
     long_ctx: float = 0.0
     code_multi: float = 0.0
+    ambiguous: float = 0.0    # needs a clarifying question even given the previous message
     source: Literal["jev", "qwen", "cloud_fast", "rules"]
     latency_ms: int = 0
     errors: list[str] = []

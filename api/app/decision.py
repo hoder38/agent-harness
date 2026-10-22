@@ -65,18 +65,24 @@ def decide(
 
     # 3. ambiguous intent → ask on a local model; the tier is decided once the intent is clear
     conf_clarify = th.get("clarify_below", 0.8)
+    amb_th = th.get("ambiguous", 0.7)
     max_rounds = int((policy.get("clarify") or {}).get("max_rounds", 5))
-    if router.intent_confidence < conf_clarify and "route" not in locked:
+    why = []
+    if router.intent_confidence < conf_clarify:
+        why.append(f"confidence {router.intent_confidence:.2f} < {conf_clarify}")
+    if router.ambiguous > amb_th:
+        why.append(f"ambiguous {router.ambiguous:.2f} > {amb_th}")
+    if why and "route" not in locked:
         if clarify_rounds >= max_rounds:
-            reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_clarify} but "
-                           f"{clarify_rounds} clarify rounds used → answer with stated assumptions")
+            reasons.append(f"3: {' & '.join(why)} but {clarify_rounds} clarify rounds used "
+                           "→ answer with stated assumptions")
         else:
             route = "clarify"
             locked.add("route")
             if "model" not in locked:
                 model = "local_cpu" if gpu_state in ("BUSY", "GAMING") else "local"
                 locked.add("model")
-            reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_clarify} → clarify on {model}")
+            reasons.append(f"3: {' & '.join(why)} → clarify on {model}")
 
     # 4. heavy tasks
     heavy = th.get("heavy", 0.6)

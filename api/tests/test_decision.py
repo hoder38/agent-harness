@@ -75,6 +75,12 @@ def test_ambiguous_with_cloud_override_keeps_cloud(policy):
     assert (out.route, out.model) == ("clarify", "cloud_strong")
 
 
+def test_ambiguous_signal_clarifies_even_with_confident_intent(policy):
+    out = d(policy, r=rr(intent_confidence=0.98, ambiguous=0.8, tier="cloud_fast"))
+    assert (out.route, out.model) == ("clarify", "local")
+    assert d(policy, r=rr(intent_confidence=0.98, ambiguous=0.3)).route == "chat"
+
+
 def test_confident_follows_router_tier(policy):
     assert d(policy, r=rr(intent_confidence=0.85, tier="cloud_strong")).model == "cloud_strong"
 

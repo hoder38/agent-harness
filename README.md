@@ -51,13 +51,13 @@ SSE event types: `decision`, `token`, `tool`, `status`, `done`, `error`, `cancel
 
 **Message prefixes**
 - Routing overrides: `/local`, `/cloud`, `/code` (strong model). Private content is detected automatically (PII/secrets/keywords) and stays local.
-- Owner commands: `/stop cloud|all`, `/resume`, `/status`.
+- Owner commands: `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other `/word` replies with the command list.
 
 **Web tools** (chat/assistant routes; never on PRIVATE threads)
 - `web_search` uses the Brave Search API and needs `BRAVE_API_KEY`; without the key it is not offered.
 - `fetch_page` can read any public URL through squid port 4751. Private, LAN, docker and metadata IPs are blocked on both ports. Port 4750 still enforces the allowlist.
 - Fetched content is wrapped in `<untrusted>` tags, capped at 2 MB download and 8000 chars of text.
-- Low-confidence messages are routed to `clarify`, which has no tools. Ask explicitly ("search the web for …") if needed.
+- Ambiguous messages (low intent confidence, or a vague referent such as "how much is that?") are routed to `clarify` on the local model, which asks one question and has no tools. Your answer is re-routed together with the original request.
 
 **Host controls**
 - `host/killswitch.sh off|cloud|all`

@@ -18,6 +18,23 @@ log = logging.getLogger(__name__)
 Enqueue = Callable[[str, dict[str, Any], str, str], Awaitable[None]]  # (fn, payload, job_id, queue_name)
 
 _COMMAND_RE = re.compile(r"^\s*/(stop)\s+(cloud|all)\s*$|^\s*/(resume)\s*$|^\s*/(status)\s*$", re.IGNORECASE)
+# "/word" at the start (not a path like /etc/x); routing overrides are handled by Gate 0.
+_SLASH_RE = re.compile(r"^\s*/([A-Za-z][\w-]*)(?=\s|$)")
+_OVERRIDES = {"local", "cloud", "code"}
+
+HELP_TEXT = """Commands
+/help - show this list
+
+Routing (put at the start of a message):
+/local <message> - answer with the local model only
+/cloud <message> - answer with a cloud model
+/code <message> - treat as a coding task
+
+Owner controls:
+/stop cloud - block all cloud model calls
+/stop all - block cloud calls and pause background jobs
+/resume - turn the kill switch off
+/status - show kill switch, GPU state and today's spend"""
 
 
 @dataclass
@@ -30,9 +47,13 @@ class SubmitResult:
 
 
 async def handle_command(text: str, *, source: str) -> str | None:
-    """Owner-only kill switch commands: /stop cloud, /stop all, /resume, /status."""
+    """Owner commands (/stop cloud|all, /resume, /status, /help); any other /word gets the help text."""
     m = _COMMAND_RE.match(text or "")
     if not m:
+        word = _SLASH_RE.match(text or "")
+        if word and word.group(1).lower() not in _OVERRIDES:
+            name = word.group(1).lower()
+            return HELP_TEXT if name == "help" else f"Unknown command /{name}.\n\n{HELP_TEXT}"
         return None
     r = state.get_redis()
     if m.group(1):
@@ -82,8 +103,13 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         await state.mark_thread_private(r, job.thread_id)
 
     router_text, router_redacted = g0.text, g0.redacted_text
+    clarify_cfg = pol.get("clarify") or {}
     clarify_ctx = await state.get_clarify_ctx(r, job.thread_id)
     clarify_rounds = clarify_ctx["rounds"] if clarify_ctx else 0
+    prev = None if clarify_ctx else await state.get_prev_msg(r, job.thread_id)
+    if prev:
+        router_text = f"[Previous message] {prev['text']}\n[Current message] {g0.text}"
+        router_redacted = f"[Previous message] {prev['redacted_text']}\n[Current message] {g0.redacted_text}"
     if clarify_ctx:
         router_text = _with_clarification(clarify_ctx["text"], clarify_ctx.get("question"), g0.text)
         # On PRIVATE threads the model saw unredacted text, so its question stays out of the redacted copy.
@@ -98,11 +124,16 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks, clarify_rounds=clarify_rounds)
     decision.reasons = g0.reasons + decision.reasons
     if decision.route == "clarify":
-        await state.set_clarify_ctx(r, job.thread_id, text=router_text, redacted_text=router_redacted,
+        # A first clarify keeps just this message (not the previous-message prefix); later rounds keep the exchange.
+        await state.set_clarify_ctx(r, job.thread_id,
+                                    text=router_text if clarify_ctx else g0.text,
+                                    redacted_text=router_redacted if clarify_ctx else g0.redacted_text,
                                     rounds=clarify_rounds + 1,
-                                    ttl_s=int((pol.get("clarify") or {}).get("context_ttl_s", 86400)))
+                                    ttl_s=int(clarify_cfg.get("context_ttl_s", 86400)))
     elif clarify_ctx:
         await state.clear_clarify_ctx(r, job.thread_id)
+    await state.set_prev_msg(r, job.thread_id, text=g0.text, redacted_text=g0.redacted_text,
+                             ttl_s=int(clarify_cfg.get("previous_ttl_s", 3600)))
     latency = int((time.monotonic() - t0) * 1000)
 
     run_id = uuid.uuid4().hex
@@ -114,7 +145,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
             "gate0": g0.model_dump(mode="json", exclude={"text"}),
             "gpu_state": gpu, "budget": budget.model_dump(), "killswitch": ks,
             "clarify_rounds": clarify_rounds,
-            **({"router_text": router_redacted} if clarify_ctx else {}),
+            **({"router_text": router_redacted} if router_redacted != g0.redacted_text else {}),
         },
         router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),
         decision=decision.model_dump(), latency_ms=latency,

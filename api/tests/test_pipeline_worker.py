@@ -228,3 +228,27 @@ async def test_private_clarify_question_stays_out_of_redacted_routing_text(redis
     await state.set_clarify_question(redis, "web:t", "Which account, 1234?")
     await pipeline.submit(job("savings", key="b"), enq)
     assert "1234" not in seen[1]["redacted_text"] and "1234" in seen[1]["text"]
+
+
+async def test_previous_message_is_router_context(redis, enq, router_seq):
+    seen, confs = router_seq
+    confs += [0.95, 0.95]
+    await pipeline.submit(job("shrimp at the market", key="a"), enq)
+    await pipeline.submit(job("how much is it?", key="b"), enq)
+    assert seen[0]["redacted_text"] == "shrimp at the market"
+    assert seen[1]["redacted_text"] == "[Previous message] shrimp at the market\n[Current message] how much is it?"
+    assert enq.calls[-1]["payload"]["text"] == "how much is it?"
+
+
+async def test_help_and_unknown_commands_are_answered_without_a_run(redis, enq):
+    res = await pipeline.submit(job("/help", key="a"), enq)
+    assert res.command_reply.startswith("Commands") and "/stop cloud" in res.command_reply
+    res = await pipeline.submit(job("/new", key="b"), enq)
+    assert res.command_reply.startswith("Unknown command /new.") and "/help" in res.command_reply
+    assert not enq.calls
+
+
+@pytest.mark.parametrize("text", ["/etc/hosts 是什麼", "/local hi", "/cloud hi", "hello /new"])
+async def test_paths_and_overrides_are_not_commands(redis, enq, text):
+    res = await pipeline.submit(job(text, key=text), enq)
+    assert res.command_reply is None and res.run_id
