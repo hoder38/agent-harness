@@ -1,4 +1,5 @@
 """The ReAct chat graph (one graph; model + tools chosen per run, fixed for the whole loop)."""
+from collections import Counter
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -12,22 +13,42 @@ Never reveal secrets. Ask before any destructive, external, or money-related act
 Answer in the user's language (Traditional Chinese for Chinese)."""
 
 ROUTE_HINTS = {
-    "clarify": "The request is ambiguous. Ask ONE short clarifying question instead of answering.",
+    "clarify": ("The request is ambiguous. Do not answer it yet. Ask ONE short clarifying question about the "
+                "single most important missing detail (which thing, time, place, version, or goal); you may "
+                "offer up to 3 short options. Nothing else."),
     "coding": "The coding sandbox is not available yet; give the best answer you can directly.",
     "assistant": "Help with personal organisation. Todo/calendar tools are not connected yet; say so if needed.",
 }
 
 
 WEB_HINT = ("You can search the web with web_search and read a page with fetch_page. Use them for current "
-            "events, recent or uncertain facts; don't search for things you already know. Cite the URLs you used.")
+            "events, recent or uncertain facts; don't search for things you already know. "
+            "Searches and page reads are limited per request, so choose them carefully.")
+
+GROUNDING_WEB = (
+    "Sources: support each factual claim with exactly ONE authoritative primary source that directly states it "
+    "(the official site of the organisation or product the claim is about, a government or standards body, the "
+    "original paper, filing, or announcement) and that you actually read with fetch_page. Cite it as [n] and list "
+    "'[n] title — URL' at the end. Never cite blogs, forums, news aggregators, or search snippets as support.\n"
+    "If you cannot verify a factual claim that way, still give your best partial answer but mark that claim "
+    "'(unverified)' — '（未驗證）' in Chinese. Greetings, opinions, creative writing, and pure reasoning or "
+    "math need no source. If the request is still ambiguous, state the assumption you made.")
+
+GROUNDING_OFFLINE = (
+    "You cannot look anything up here. Never invent sources or URLs. If your answer contains factual claims, "
+    "end with one line saying they are unverified ('⚠️ 未驗證' in Chinese). Greetings, opinions, creative "
+    "writing, and pure reasoning or math need no such note. If the request is still ambiguous, state the "
+    "assumption you made.")
 
 
 def system_prompt(route: str, channel: str, model: str, *, web: bool = False) -> str:
     parts = [BASE_SYSTEM]
     if hint := ROUTE_HINTS.get(route):
         parts.append(hint)
-    if web:
-        parts.append(WEB_HINT)
+    if route != "clarify":
+        if web:
+            parts.append(WEB_HINT)
+        parts.append(GROUNDING_WEB if web else GROUNDING_OFFLINE)
     if channel == "line":
         parts.append("Reply in plain text (no markdown), concise, at most a few short paragraphs.")
     if model == "local_cpu":
@@ -81,15 +102,23 @@ def repair_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
     return out
 
 
+def _turn_tool_counts(messages: list[AnyMessage]) -> Counter:
+    human_idx = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    start = human_idx[-1] if human_idx else 0
+    return Counter(m.name for m in messages[start:] if isinstance(m, ToolMessage))
+
+
 def build_graph(
     llm: BaseChatModel | None,
     tools: list,
     *,
     system: str = BASE_SYSTEM,
     max_turns: int = 20,
+    tool_limits: dict[str, int] | None = None,
     checkpointer: Any = None,
 ):
     bound = llm.bind_tools(tools) if (llm is not None and tools) else llm
+    limits = tool_limits or {}
 
     async def agent(state: MessagesState) -> dict[str, Any]:
         if bound is None:
@@ -97,11 +126,34 @@ def build_graph(
         msgs = [SystemMessage(system), *repair_tool_calls(stub_old_tool_results(trim_history(state["messages"], max_turns)))]
         return {"messages": [await bound.ainvoke(msgs)]}
 
+    tool_node = ToolNode(tools) if tools else None
+
+    async def run_tools(state: MessagesState) -> dict[str, Any]:
+        """ToolNode with per-turn call caps; calls over a cap are answered without running."""
+        last = state["messages"][-1]
+        used = _turn_tool_counts(state["messages"])
+        allowed, blocked = [], []
+        for tc in last.tool_calls:
+            cap = limits.get(tc["name"])
+            if cap is not None and used[tc["name"]] >= cap:
+                blocked.append(ToolMessage(
+                    f"Limit reached: {tc['name']} may run at most {cap} times per request. Answer with what you "
+                    "have and mark anything you could not verify as unverified.",
+                    tool_call_id=tc["id"], name=tc["name"], status="error"))
+            else:
+                used[tc["name"]] += 1
+                allowed.append(tc)
+        out: list[AnyMessage] = []
+        if allowed:
+            res = await tool_node.ainvoke({"messages": [last.model_copy(update={"tool_calls": allowed})]})
+            out = list(res["messages"])
+        return {"messages": out + blocked}
+
     g = StateGraph(MessagesState)
     g.add_node("agent", agent)
     g.add_edge(START, "agent")
     if tools:
-        g.add_node("tools", ToolNode(tools))
+        g.add_node("tools", run_tools)
         g.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
         g.add_edge("tools", "agent")
     else:

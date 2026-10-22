@@ -51,6 +51,15 @@ async def handle_command(text: str, *, source: str) -> str | None:
     return f"killswitch={ks} gpu={gpu} spend today: {spend}"
 
 
+def _with_clarification(request: str, question: str | None, answer: str) -> str:
+    """Routing text for an answer to a clarifying question: the router judges the whole exchange."""
+    parts = [request]
+    if question:
+        parts.append(f"[Assistant asked] {question}")
+    parts.append(f"[User answered] {answer}")
+    return "\n".join(parts)
+
+
 async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None = None) -> SubmitResult:
     r = state.get_redis()
     if not await state.dedupe(r, job.dedupe_key):
@@ -72,12 +81,28 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     if private:
         await state.mark_thread_private(r, job.thread_id)
 
+    router_text, router_redacted = g0.text, g0.redacted_text
+    clarify_ctx = await state.get_clarify_ctx(r, job.thread_id)
+    clarify_rounds = clarify_ctx["rounds"] if clarify_ctx else 0
+    if clarify_ctx:
+        router_text = _with_clarification(clarify_ctx["text"], clarify_ctx.get("question"), g0.text)
+        # On PRIVATE threads the model saw unredacted text, so its question stays out of the redacted copy.
+        router_redacted = _with_clarification(clarify_ctx["redacted_text"],
+                                              None if private else clarify_ctx.get("question"),
+                                              g0.redacted_text)
+
     router = await route(
-        text=g0.text, redacted_text=g0.redacted_text, private=private,
+        text=router_text, redacted_text=router_redacted, private=private,
         gpu_state=gpu, killswitch=ks, policy=pol,
     )
-    decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks)
+    decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks, clarify_rounds=clarify_rounds)
     decision.reasons = g0.reasons + decision.reasons
+    if decision.route == "clarify":
+        await state.set_clarify_ctx(r, job.thread_id, text=router_text, redacted_text=router_redacted,
+                                    rounds=clarify_rounds + 1,
+                                    ttl_s=int((pol.get("clarify") or {}).get("context_ttl_s", 86400)))
+    elif clarify_ctx:
+        await state.clear_clarify_ctx(r, job.thread_id)
     latency = int((time.monotonic() - t0) * 1000)
 
     run_id = uuid.uuid4().hex
@@ -88,6 +113,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
             "job": job.model_dump(mode="json", exclude={"text"}),
             "gate0": g0.model_dump(mode="json", exclude={"text"}),
             "gpu_state": gpu, "budget": budget.model_dump(), "killswitch": ks,
+            "clarify_rounds": clarify_rounds,
+            **({"router_text": router_redacted} if clarify_ctx else {}),
         },
         router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),
         decision=decision.model_dump(), latency_ms=latency,

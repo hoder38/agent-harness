@@ -1,12 +1,20 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: "2026-10-21.1"
+version: "2026-10-22.1"
 
 thresholds:
-  clarify_below: 0.5      # intent confidence < this -> route=clarify
-  bump_below: 0.8         # confidence in [clarify_below, bump_below) -> bump tier one level
+  clarify_below: 0.8      # intent confidence < this -> route=clarify on a local model (no tier bump)
   heavy: 0.6              # code_multi / long_ctx above this -> cloud_strong
   risky: 0.5              # router risky above this -> risky=True
+
+clarify:
+  max_rounds: 5           # after this many clarify turns in a row, answer with stated assumptions
+  context_ttl_s: 86400    # how long the next message counts as the answer to a clarifying question
+
+# Per-run caps on tool calls (one user turn).
+tool_limits:
+  web_search: 3
+  fetch_page: 4
 
 # Daily USD budget per provider (LiteLLM spend tracked by the harness).
 budgets_usd_daily:

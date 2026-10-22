@@ -110,6 +110,7 @@ Modalities: **text, voice, image, video, documents**.
                                ▼
 ┌ L9 VERIFY LAYER ──────────────────────────────────────────────────────────┐
 │ deterministic checks → model check → escalate tier (max 2) → Inbox        │
+│ grounded answering: clarify → claims → 1 primary source each (§12a)       │
 ├ L10 APPROVAL + OUTPUT ────────────────────────────────────────────────────┤
 │ interrupt() for risky actions; Inbox UI; LINE push; SSE; memory write     │
 └───────────────────────────────────────────────────────────────────────────┘
@@ -223,8 +224,10 @@ def decide(job, gate0, router, gpu_state, budget) -> Decision:
     # 2. PRIVATE  → model must be local
     #       if gpu_state == GAMING: routing = rule-based (§6, no model call);
     #       execution: interactive → local_cpu (warn, short answers); background → defer until FREE
-    # 3. intent confidence < 0.5 → route="clarify"
-    #    0.5 ≤ conf < 0.8 → bump tier one level
+    # 3. intent confidence < 0.8 → route="clarify" on a LOCAL model (local_cpu if GPU BUSY/GAMING);
+    #    no tier bump — never pay a cloud model to ask a question. /cloud override and PRIVATE keep their model.
+    #    The answer is re-routed together with the original request + question (§12a MVP), so the tier
+    #    (and any escalation) is decided once the intent is clear. After 5 clarify rounds → answer with assumptions.
     # 4. code_multi > 0.6 or long_ctx > 0.6 → cloud_strong (cloud_fast if over budget)
     # 5. gpu_state in (BUSY, GAMING) and model == local and not PRIVATE → cloud_fast
     # 6. channel == "line" → prefer local/cloud_fast, short answer, no coding approvals inline
@@ -411,6 +414,198 @@ Approval:
 
 Output: SSE (web), LINE reply/push (never PRIVATE content), Inbox, memory write, PR link.
 
+## 12a. Grounded answering (clarify → verify claims → cite) — decided 2026-10-22, not yet implemented
+
+Owner preferences, applied to **every** answer:
+1. **Clarify first** whenever intent/scope is uncertain. *Intent* uncertainty → ask the user; *factual* uncertainty → search (never ask "should I search?").
+2. **One authoritative, primary source that directly supports each factual claim.** Secondary sources are never cited.
+3. **Insufficient evidence → partial answer** with unverified content explicitly labelled.
+
+Claims are classified first: greetings, creative writing, opinion, pure reasoning/math are `exempt` (no source); every factual claim needs a citation or an "unverified" label.
+PRIVATE threads never use web tools; they may cite only the local knowledge base (§10a). Until that ships (phase 10/10a), every factual claim on a PRIVATE thread is labelled unverified.
+
+### MVP subset (implemented 2026-10-22)
+The full graph below is phase 8a. The MVP ReAct graph already does:
+- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (confidence < `clarify_below` 0.8) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (5) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
+- **Prompt rules:** `GROUNDING_WEB` (one primary source read with `fetch_page`, `[n]` citations, "(unverified)"/「（未驗證）」 labels, exempt kinds) or `GROUNDING_OFFLINE` (no invented sources; one "⚠️ 未驗證" line) on every non-clarify route; the clarify hint asks one question with ≤ 3 options.
+- **Tool caps:** `policy.yaml tool_limits` (`web_search: 3`, `fetch_page: 4`) per user turn; calls over the cap get an error `ToolMessage` without running.
+
+Deferred from the MVP (land with phase 8a):
+- **Citation URL check** — after the run, every URL in the answer must be one actually read by `fetch_page` in this run; otherwise append a warning line. Implement as a final graph node that rewrites the last `AIMessage` (same id), so the checkpointed thread, the `done` event, and LINE delivery all carry the warning.
+- **Source tier labels** — `config/authority.yaml` (see Authority tiers below) applied in `web_search`/`fetch_page` output as `tier="primary|official:<entity>|secondary|reject|unknown"` so the model can pick sources; rules only, no LLM judge. Deferred because the domain list needs upkeep and adds little without per-claim verification.
+
+### Integration
+- New graph `app/graphs/grounded.py` replaces the ReAct graph in `worker.run_agent`; the ReAct graph stays for Studio/regression.
+- `decision.route == "clarify"` becomes a hard trigger (`force_clarify=True`), not just a prompt hint.
+- New structured functions `search_web()` / `fetch_source()` are called **by nodes, not by LLM tool-calling**, so budgets are enforceable. The string tools in `tools/web.py` remain for the ReAct graph.
+- Implement `POST /runs/{run_id}/resume` (currently 501).
+
+### State schema (`app/graphs/grounded_state.py`)
+```python
+ClaimKind   = Literal["factual", "greeting", "creative", "opinion", "reasoning", "math", "instruction"]
+ClaimStatus = Literal["pending", "verified", "unverified", "contradicted", "exempt"]
+Tier        = Literal["T1_primary", "T2_secondary", "T3_reject", "unknown"]
+
+class Clarification(TypedDict): round: int; question: str; answer: str | None
+                                slot: str   # referent|scope_time|scope_region|version|goal|conflict
+class Claim(TypedDict):
+    id: str; text: str; kind: ClaimKind; status: ClaimStatus
+    entity: str | None           # subject of the claim (decides which site is "official")
+    time_sensitive: bool
+    source_id: str | None        # exactly one
+    quote: str | None            # verbatim, ≤ 300 chars
+    reason: str | None           # shown to the user when unverified/contradicted
+class Candidate(TypedDict): url: str; title: str; snippet: str; domain: str; age: str | None
+                            tier: Tier; tier_reason: str; for_claims: list[str]
+class Source(TypedDict): id: str; url: str; final_url: str; domain: str; title: str
+                         tier: Tier; tier_reason: str; fetched_at: str; published_at: str | None
+                         text_sha256: str; excerpt: str   # relevant windows only, ≤ 8000 chars
+class Budget(TypedDict): search_used: int; fetch_used: int; clarify_used: int
+                         usd: float; active_ms: int      # waiting for the user is not counted
+                         exhausted: str | None           # search|fetch|clarify|usd|time
+class Answer(TypedDict): text: str; verdict: Literal["complete", "partial", "exempt_only"]
+                         citations: list[dict]; unverified: list[str]; assumptions: list[str]
+
+class GroundedState(MessagesState):
+    run_id: str; channel: Literal["web", "line"]; private: bool; model: str; force_clarify: bool
+    question: str                                     # redacted turn text + clarification answers
+    clarifications: list[Clarification]; assumptions: list[str]
+    draft: str                                        # internal, never streamed
+    claims: Annotated[list[Claim], merge_by_id]
+    candidates: Annotated[list[Candidate], merge_by_id]   # keyed by url
+    sources: dict[str, Source]; queries: list[str]
+    budget: Budget; turn_started_ms: int
+    answer: Answer | None; check_failures: list[str]
+```
+`ingest` resets all per-turn fields on each new user turn; `messages` keeps accumulating. Sources from earlier turns are stubbed in model input (like `stub_old_tool_results`).
+
+### Node flow
+```
+START → ingest → assess_ambiguity ──ambiguous & clarify_used<5──▶ ask_user (interrupt) ──resume──┐
+                      │◀──────────────────────────────────────────────────────────────────────────┘
+                      ▼ clear, or cap reached → assumptions
+                    draft → extract_claims ──no factual claims──────────────────────────────▶ compose
+                                  ▼
+                 ┌─▶ plan_queries → search → classify_candidates → fetch → verify_support ─┐
+                 └──────────── pending factual claims & budget left ◀──────────────────────┘
+                                  ▼ all resolved | budget exhausted
+                    compose → final_check ──fail (1st)──▶ compose
+                                  ▼ pass | 2nd fail → downgrade to unverified
+                    interpretation_conflict? ──yes & clarify_used<5──▶ ask_user
+                                  ▼
+                                 END
+```
+A `budget_guard` conditional edge sits before every costly node and routes to `compose` when a limit is hit. The research loop runs at most 3 times (= search cap), so it always terminates.
+
+| Node | Kind | Behaviour |
+|---|---|---|
+| `ingest` | code | reset per-turn state; `private/channel/model` injected from `Decision` |
+| `assess_ambiguity` | LLM, structured, T=0 | → `{ambiguous, slot, question_to_user, options[≤3], assumption_if_skipped}`. Ambiguous if: unclear referent; missing time/region/version that changes the answer; ≥2 plausible readings with different answers; conflicting constraints; `force_clarify`. One question per round |
+| `ask_user` | `interrupt()` | `clarify_used += 1`; resume value → `clarifications[-1].answer`, merged into `question`. At the cap, `assumption_if_skipped` → `assumptions` |
+| `draft` | LLM | internal draft (`tags=["internal"]`; the worker does not emit its tokens) |
+| `extract_claims` | LLM + code override | atomic claims + kind. Code forces `factual` for sentences with numbers, dates, prices, versions, or named entity + factual verb |
+| `plan_queries` | LLM | ≤ remaining searches; one query may cover several claims; `site:` when the entity's official domain is known |
+| `search` | tool | §Tools; `search_used += 1` |
+| `classify_candidates` | rules → LLM for `unknown` | §Authority; `T3_reject` is never fetched |
+| `fetch` | tool | best tier × claim coverage first, ≤ remaining fetches; re-classify by `final_url` after redirects |
+| `verify_support` | LLM quote + code checks | §Direct support; a claim is bound to one source once verified |
+| `compose` | LLM, streamed | §Output; 20 % of USD and 15 s are reserved for it |
+| `final_check` | code | §Final check |
+| `interpretation_conflict` | code + LLM | primary sources disagree on what the question means (e.g. two definitions) → ask, or list both readings as assumptions |
+
+A claim backed only by T2 sources → `unverified` ("only secondary sources found").
+
+### Tools (structured, called by nodes)
+```python
+async def search_web(query: str, *, count=5, freshness: Literal["pd","pw","pm","py"] | None = None,
+                     ledger_key: str) -> SearchResult      # {query, hits[{url,title,snippet,domain,age}], error, cached}
+async def fetch_source(url: str, *, focus: list[str], max_chars=8000,
+                       ledger_key: str) -> FetchResult     # {url, final_url, status, content_type, title,
+                                                           #  published_at, excerpt, text_sha256, truncated, error, cached}
+```
+- Reuse Brave endpoint, strict egress proxy, `check_url`, `fetch_proxy`, `MAX_DOWNLOAD_BYTES`, `html_to_text`. Queries are checked against Gate 0 rules before sending.
+- **Idempotency ledger:** Redis `ledger:{thread}:{turn}:{sha1(args)}` (TTL 1 d); arq `Retry` / checkpoint replays hit the ledger and are not charged again.
+- **Fetch cache:** `fetch:{sha1(final_url)}` 24 h; cache hits are free.
+- **Focus windows:** ±600 chars around matches of claim keywords/numbers, merged up to `max_chars` (avoids the fixed head truncation cutting the evidence).
+- HTTP 429/errors still consume one unit (no retry loops). PDFs are unsupported for now → claim unverified ("primary source is a PDF"); Docling later.
+- `published_at` from `article:published_time`, `<time datetime>`, or `Last-Modified`.
+- PRIVATE: `kb_search()` / `kb_read()` with the same interfaces (`domain = vault:<path>`); until §10a ships they return `error="local KB not available"`.
+
+### Authority tiers (`config/authority.yaml`) — rules first, LLM only for edge cases
+```yaml
+primary_suffixes: [".gov", ".gov.tw", ".gov.uk", ".europa.eu", ".edu"]   # .edu only for the institution itself
+primary_domains:  [rfc-editor.org, ietf.org, w3.org, iso.org, law.moj.gov.tw, sec.gov, mops.twse.com.tw, doi.org, arxiv.org]
+entity_domains:   { OpenAI: [openai.com, platform.openai.com], Anthropic: [anthropic.com, docs.anthropic.com] }
+secondary_domains: [reuters.com, apnews.com, cna.com.tw, wikipedia.org]
+reject_patterns:  [medium.com, reddit.com, quora.com, stackoverflow.com, "*.blogspot.com"]
+```
+Order: reject → T3; entity's own domain → T1 (only for claims **about that entity**); primary suffix/domain and the publisher is the originator → T1; secondary → T2 (Wikipedia is used only to find the primary it cites); GitHub → T1 only for the entity's official org; otherwise `unknown` → LLM judge that sees **only URL, title, snippet, claim** (no page body; limits injection), cached by `(domain, entity)` for 30 days.
+
+### Direct support (all must hold for `verified`)
+1. Source tier is `T1_primary`.
+2. The LLM-extracted `quote` is a substring of `excerpt` after NFKC/whitespace/width normalisation (prevents fabricated quotes).
+3. Every number, date, and version in the claim appears in the quote (`1,000` == `1000`).
+4. Entailment judge (T=0) says the quote alone `supports` the claim; `refutes` → `contradicted` and the answer states what the source says.
+5. Time-sensitive claims need `published_at`, or the answer notes "per page fetched on {date}".
+6. Several qualifying sources → pick one: entity's own domain > newer > shorter excerpt.
+
+### Final check (code)
+- Each verified claim maps to exactly one `[n]`; each `[n]` is a T1 entry in `sources`.
+- No URL in the answer that is not in `sources`.
+- Each unverified/contradicted claim is in the "⚠️ Unverified" block or ends with "(unverified)".
+- Exempt content has no citations; non-empty `assumptions` → an "Assumptions" paragraph.
+- 1st failure → recompose with the failure list; 2nd failure → deterministic downgrade (uncited sentences move to the unverified block).
+
+### Output
+```
+<answer; verified sentences end with [1]>
+
+Assumptions: …                      (if any)
+
+⚠️ Unverified:
+- <claim> (reason: only secondary sources / source is a PDF / verification budget exhausted / source says …)
+
+Sources:
+[1] <title> — <url> (fetched 2026-10-22)
+```
+LINE uses the same structure without markdown; PRIVATE threads still send `private_line_notice`. Labels follow the user's language (Traditional Chinese for Chinese).
+
+### Interrupt / checkpointer
+- `AsyncPostgresSaver`, `thread_id = job.thread_id`; every node checkpoints; budget counters live in state and the ledger lives in Redis, so crashes/retries resume without double charging.
+- `ask_user`: `interrupt({"type": "clarify", "round", "question", "options", "private"})`.
+- Worker: `astream(..., stream_mode=["messages", "updates"])`; on `__interrupt__` → emit SSE `interrupt`, `runmeta.status = awaiting_input`, Redis `pending:{thread_id} = {run_id, round, created_at}` (TTL 24 h). LINE replies with the question (PRIVATE → `private_line_notice`). Waiting time is not counted in `active_ms`.
+- Pipeline: after commands, if `pending:{thread_id}` exists, the next message (web or LINE) is the **answer**; Gate 0 still runs, then a resume job (new `run_id`, `parent_run_id`) runs `astream(Command(resume=text), cfg)`. `/skip` resumes with `None` → answer using `assumption_if_skipped`.
+- Pending expired → the next message starts a new turn (clear the pending task first if needed; see §17).
+- Web: `POST /runs/{run_id}/resume {value}`; `useAgentThread` renders the question + option buttons on `interrupt`. Cancel deletes `pending:{thread_id}`.
+
+### Cost limits (`policy.yaml`, per user turn across resumes)
+```yaml
+tool_limits: { web_search: 3, fetch_page: 4 }   # already used by the MVP graph
+clarify: { max_rounds: 5, context_ttl_s: 86400 } # already used by the MVP decision layer
+grounding:
+  enabled: true
+  per_turn: { max_usd: 0.05, max_active_s: 90 }  # search/fetch/clarify caps come from the keys above
+  reserve_for_compose: { usd_fraction: 0.2, seconds: 15 }
+  brave_usd_per_query: 0.0          # VERIFY plan price
+  llm_authority_cache_days: 30
+executor:
+  recursion_limit: 60               # 5 clarify rounds ×2 + 3 research loops ×5 + fixed nodes ≈ 35
+```
+- Before each LLM call: `est = in_tokens_est·price_in + max_tokens·price_out` (`prices_usd_per_mtok`); skip to `compose` if `usd + est > max_usd·(1 − reserve)`. Actual usage is added afterwards.
+- Each node checks `active_ms + elapsed > (max_active_s − reserve.seconds)·1000`.
+- Local models cost $0 and are bounded only by time and counts. Daily provider budgets, kill switch, and GPU semaphore still apply first.
+- Exhaustion → `budget.exhausted` is set and the answer ends with "⚠️ Verification limit reached ({reason}); some content is unverified."
+
+### Tests (pytest + `GenericFakeChatModel` + `InMemorySaver` + `fakeredis`; monkeypatch `search_web`/`fetch_source`)
+| Area | Cases |
+|---|---|
+| Clarify | ambiguous referent → one interrupt with `slot=referent`; clear question → no interrupt; `route=clarify` always asks; 5 ambiguous rounds → no 6th interrupt, answer has assumptions; web resume merges answer into `question`; LINE next message resumes, Gate 0 runs, `/skip` works; PRIVATE clarify sends notice only on LINE; waiting 10 min (fake clock) not counted in `active_ms` |
+| Authority | openai.com is T1 for OpenAI pricing, not for Anthropic pricing; only reuters/wikipedia → unverified and not cited; medium.com never fetched; redirect to rejected domain → rejected; unknown-domain LLM verdict cached (2nd call skips LLM) |
+| Support | quote not in excerpt → not verified; claim "$20" vs quote "$25" → `contradicted` with source's value; two T1 sources → one `[n]`; time-sensitive w/o date → fetched-date note; prompt injection in page does not change tiers or output |
+| Partial | 1 of 3 claims verified → `partial` with 2 reasons; greeting/creative only → no search, `exempt_only`; poem + one fact → only the fact needs a source; PRIVATE (KB missing) → no web calls, all facts unverified |
+| Budget | 5 queries needed → stops at 3, `exhausted=search`; 6 fetches → 4, cache hits free; USD estimate over 80 % → skip research but still compose, total ≤ $0.05; active time 76 s → compose, ≤ 90 s; arq `Retry` replay → ledger hit, no double count; Brave 429 → one unit, no loop |
+| Check / regression | URL not in `sources` → repair, then downgrade; existing `test_graph.py` / `test_pipeline_worker.py` (cancel, kill switch, LINE delivery, `repair_tool_calls`) pass; checkpoint with 3 sources < 100 KB |
+
 ## 13. Docker Compose (skeleton)
 
 ```yaml
@@ -523,10 +718,10 @@ nginx (nodeReact) additions: `location /api/agent/` and `location /line/webhook`
 ```
 agent-harness/
   docker-compose.yml  .env.example  ARCHITECTURE.md
-  config/  policy.yaml  models.yaml  privacy_rules.yaml
+  config/  policy.yaml  models.yaml  privacy_rules.yaml  authority.yaml
   api/                 # FastAPI + LangGraph + arq tasks
     app/  main.py  routes/{web,line,events,ingest,uploads,todos,inbox}.py
-          graphs/{main,chat,assistant,coding,verify}.py
+          graphs/{main,grounded,grounded_state,chat,assistant,coding,verify}.py
           gates/{gate0,gate1_qwen,jev_router}.py  decision.py
           jobs/  memory/  rag/  tools/  mcp_server/  llm/
     tests/
@@ -552,6 +747,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 6 | Copilot ingest hooks + harness-memory MCP | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
 | 7 | Todos + Inbox + background approvals | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
 | 8 | LINE channel + **health alerts** | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
+| 8a | Grounded answering (§12a): clarify interrupt/resume (web + LINE), claim extraction, authority tiers, per-turn caps | §12a test table passes; ambiguous question asks before answering; every factual claim has one T1 citation or an "Unverified" label; caps never exceeded |
 | 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
@@ -584,6 +780,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Copilot CLI: honours `HTTPS_PROXY`; least-privilege token type; usage/credit field names in events and OTel.
 - Name of the nodeReact nginx Docker network.
 - Obsidian Importer: Notion API support and database → Bases mapping; linuxserver/obsidian image.
+- §12a: Brave `freshness` parameter and per-query price; `__interrupt__` key in the `updates` stream and `Command(resume=…)` behaviour in the pinned langgraph version; what happens when new input is sent to a thread with a pending interrupt (else clear it via `aupdate_state`); whether the LINE reply token outlives a clarify round (else use push); local KB (§10a) timeline for PRIVATE verification.
 
 ## 18. Adopted improvements (decided 2026-10-20)
 
@@ -600,6 +797,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 9 | Memory review UI | **Adopted** | §19 |
 | 10 | Health checks + LINE alerts | **Adopted** | §19 |
 | 11 | Egress allowlist proxy | **Adopted** | §2, §13 |
+| 12 | Grounded answering: clarify first, one primary source per claim, labelled partial answers (2026-10-22) | **Adopted** | §12a |
 
 ## 19. Operations
 

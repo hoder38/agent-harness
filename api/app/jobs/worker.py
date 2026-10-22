@@ -116,6 +116,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             llm, tools,
             system=system_prompt(route, job.channel, model, web=any(t.name == "fetch_page" for t in tools)),
             max_turns=int(ex.get("max_history_turns", 20)),
+            tool_limits={k: int(v) for k, v in (pol.get("tool_limits") or {}).items()},
             checkpointer=ctx["checkpointer"],
         )
         cfg = {
@@ -182,6 +183,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     await state.emit(r, run_id, "done", {"text": final, "model": model, "usage": usage, "cost_usd": cost, "ms": elapsed})
     await state.set_run_meta(r, run_id, status="done")
     await db.update_outcome(run_id, {"status": "done", "usage": usage, "ms": elapsed, "model": model}, cost)
+    if decision.route == "clarify" and final:
+        await state.set_clarify_question(r, job.thread_id, final[:1000])
     if job.channel == "line":
         await _deliver_line(job, decision, delivery, final, pol)
     return {"status": "done"}

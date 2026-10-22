@@ -30,7 +30,7 @@ def replay_row(row: dict, pol: dict) -> tuple[Decision, Decision]:
     router = RouterResult(**row["router"])
     old = Decision(**row["decision"])
     new = decide(job, g0, router, inputs["gpu_state"], Budget(**inputs["budget"]), pol,
-                 killswitch=inputs.get("killswitch", "off"))
+                 killswitch=inputs.get("killswitch", "off"), clarify_rounds=inputs.get("clarify_rounds", 0))
     return old, new
 
 

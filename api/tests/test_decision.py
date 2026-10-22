@@ -57,14 +57,33 @@ def test_private_gaming_background_defers(policy):
     assert out.route == "defer" and out.queue == "background"
 
 
-# 3. confidence
-def test_low_confidence_clarifies(policy):
-    assert d(policy, r=rr(intent_confidence=0.3)).route == "clarify"
+# 3. confidence: ambiguous → clarify on a local model, no tier bump
+@pytest.mark.parametrize("conf", [0.3, 0.6])
+def test_ambiguous_clarifies_on_local_even_if_router_wants_cloud(policy, conf):
+    out = d(policy, r=rr(intent_confidence=conf, tier="cloud_strong", code_multi=0.9))
+    assert (out.route, out.model) == ("clarify", "local")
 
 
-def test_mid_confidence_bumps_tier(policy):
-    assert d(policy, r=rr(intent_confidence=0.6, tier="local")).model == "cloud_fast"
-    assert d(policy, r=rr(intent_confidence=0.6, tier="cloud_strong")).model == "cloud_strong"
+@pytest.mark.parametrize("gpu", ["BUSY", "GAMING"])
+def test_ambiguous_with_gpu_busy_clarifies_on_cpu_not_cloud(policy, gpu):
+    out = d(policy, r=rr(intent_confidence=0.6, tier="cloud_fast"), gpu=gpu)
+    assert (out.route, out.model) == ("clarify", "local_cpu")
+
+
+def test_ambiguous_with_cloud_override_keeps_cloud(policy):
+    out = d(policy, j=job(override="cloud"), r=rr(intent_confidence=0.6, tier="cloud_strong"))
+    assert (out.route, out.model) == ("clarify", "cloud_strong")
+
+
+def test_confident_follows_router_tier(policy):
+    assert d(policy, r=rr(intent_confidence=0.85, tier="cloud_strong")).model == "cloud_strong"
+
+
+def test_clarify_cap_answers_with_router_tier(policy):
+    out = decide(job(), g0(), rr(intent_confidence=0.6, tier="cloud_fast"), "FREE", NO_BUDGET, policy,
+                 clarify_rounds=5)
+    assert (out.route, out.model) == ("chat", "cloud_fast")
+    assert any("assumptions" in x for x in out.reasons)
 
 
 # 4. heavy

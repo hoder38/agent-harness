@@ -179,3 +179,52 @@ async def test_worker_killswitch_all_pauses_background(redis, enq, monkeypatch):
     out = await worker.run_agent({"redis": FakeArq(), "checkpointer": InMemorySaver()}, enq.calls[-1]["payload"])
     assert out["status"] == "paused" and requeued[0]["_queue_name"] == "arq:background"
     assert res.decision.queue == "background"
+
+
+# ---------------------------------------------------------------- clarify flow
+@pytest.fixture
+def router_seq(monkeypatch):
+    """Router returning the given confidences in order and recording what it was asked."""
+    seen: list[dict] = []
+    confs: list[float] = []
+
+    async def fake_route(**kw):
+        seen.append(kw)
+        return RouterResult(intent="chat", intent_confidence=confs.pop(0), tier="cloud_strong", source="jev")
+
+    monkeypatch.setattr(pipeline, "route", fake_route)
+    return seen, confs
+
+
+async def test_answer_to_clarifying_question_is_rerouted_with_context(redis, enq, router_seq, monkeypatch):
+    from app.jobs import worker
+
+    seen, confs = router_seq
+    confs += [0.4, 0.95]
+    first = await pipeline.submit(job("that one", key="a"), enq)
+    assert (first.decision.route, first.decision.model) == ("clarify", "local")
+
+    monkeypatch.setattr(worker, "make_llm", lambda alias, ks: GenericFakeChatModel(messages=iter([AIMessage("Which phone?")])))
+    await worker.run_agent({"checkpointer": InMemorySaver(), "redis": None, "job_try": 1}, enq.calls[-1]["payload"])
+
+    second = await pipeline.submit(job("the iPhone 17", key="b"), enq)
+    assert seen[1]["redacted_text"] == "that one\n[Assistant asked] Which phone?\n[User answered] the iPhone 17"
+    assert (second.decision.route, second.decision.model) == ("chat", "cloud_strong")  # escalates by router tier
+    assert enq.calls[-1]["payload"]["text"] == "the iPhone 17"  # the model still gets just the new turn
+    assert await state.get_clarify_ctx(redis, "web:t") is None
+
+
+async def test_clarify_rounds_are_capped(redis, enq, router_seq):
+    _, confs = router_seq
+    confs += [0.4] * 6
+    routes = [(await pipeline.submit(job(f"m{i}", key=f"k{i}"), enq)).decision.route for i in range(6)]
+    assert routes == ["clarify"] * 5 + ["chat"]
+
+
+async def test_private_clarify_question_stays_out_of_redacted_routing_text(redis, enq, router_seq):
+    seen, confs = router_seq
+    confs += [0.4, 0.95]
+    await pipeline.submit(job("check this", key="a", source="finance"), enq)
+    await state.set_clarify_question(redis, "web:t", "Which account, 1234?")
+    await pipeline.submit(job("savings", key="b"), enq)
+    assert "1234" not in seen[1]["redacted_text"] and "1234" in seen[1]["text"]

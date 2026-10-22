@@ -10,15 +10,6 @@ from .models import (
     RouterResult,
 )
 
-TIER_ORDER: list[ModelAlias] = ["local", "cloud_fast", "cloud_strong"]
-
-
-def _bump(model: ModelAlias) -> ModelAlias:
-    if model not in TIER_ORDER:
-        return model
-    return TIER_ORDER[min(TIER_ORDER.index(model) + 1, len(TIER_ORDER) - 1)]
-
-
 def decide(
     job: Job,
     gate0: Gate0Result,
@@ -27,6 +18,7 @@ def decide(
     budget: Budget,
     policy: dict[str, Any],
     killswitch: KillSwitch = "off",
+    clarify_rounds: int = 0,
 ) -> Decision:
     th = policy.get("thresholds", {})
     providers: dict[str, str] = policy.get("providers", {"cloud_fast": "openai", "cloud_strong": "anthropic"})
@@ -71,18 +63,20 @@ def decide(
                 reasons.append(f"2: PRIVATE → local (was {model})")
             model = "local"
 
-    # 3. intent confidence
-    conf_clarify = th.get("clarify_below", 0.5)
-    conf_bump = th.get("bump_below", 0.8)
+    # 3. ambiguous intent → ask on a local model; the tier is decided once the intent is clear
+    conf_clarify = th.get("clarify_below", 0.8)
+    max_rounds = int((policy.get("clarify") or {}).get("max_rounds", 5))
     if router.intent_confidence < conf_clarify and "route" not in locked:
-        route = "clarify"
-        locked.add("route")
-        reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_clarify} → clarify")
-    elif router.intent_confidence < conf_bump and "model" not in locked:
-        new = _bump(model)
-        if new != model:
-            reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_bump} → bump {model}→{new}")
-            model = new
+        if clarify_rounds >= max_rounds:
+            reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_clarify} but "
+                           f"{clarify_rounds} clarify rounds used → answer with stated assumptions")
+        else:
+            route = "clarify"
+            locked.add("route")
+            if "model" not in locked:
+                model = "local_cpu" if gpu_state in ("BUSY", "GAMING") else "local"
+                locked.add("model")
+            reasons.append(f"3: confidence {router.intent_confidence:.2f} < {conf_clarify} → clarify on {model}")
 
     # 4. heavy tasks
     heavy = th.get("heavy", 0.6)

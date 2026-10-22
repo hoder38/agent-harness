@@ -127,6 +127,34 @@ async def is_cancelled(r: aioredis.Redis, run_id: str) -> bool:
     return bool(await r.exists(f"cancel:{run_id}"))
 
 
+# ---------------------------------------------------------------- clarify context
+# While a clarifying question is open, the next message is routed together with the
+# original request and the question, so a short answer is not judged ambiguous on its own.
+async def get_clarify_ctx(r: aioredis.Redis, thread_id: str) -> dict[str, Any] | None:
+    raw = await r.hgetall(f"clarify:{thread_id}")
+    if not raw:
+        return None
+    return {**raw, "rounds": int(raw.get("rounds", 0))}
+
+
+async def set_clarify_ctx(r: aioredis.Redis, thread_id: str, *, text: str, redacted_text: str,
+                          rounds: int, ttl_s: int) -> None:
+    key = f"clarify:{thread_id}"
+    await r.delete(key)
+    await r.hset(key, mapping={"text": text, "redacted_text": redacted_text, "rounds": rounds})
+    await r.expire(key, ttl_s)
+
+
+async def set_clarify_question(r: aioredis.Redis, thread_id: str, question: str) -> None:
+    key = f"clarify:{thread_id}"
+    if await r.exists(key):
+        await r.hset(key, "question", question)
+
+
+async def clear_clarify_ctx(r: aioredis.Redis, thread_id: str) -> None:
+    await r.delete(f"clarify:{thread_id}")
+
+
 # ---------------------------------------------------------------- GPU semaphore (crash-safe: entries expire)
 class GpuSemaphore:
     KEY = "sem:gpu"
