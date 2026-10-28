@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     brave_api_key: str = ""
     fetch_proxy: str = "http://egress-proxy:4751"   # open-egress squid port (private IPs blocked) for fetch_page
+    browser_url: str = "http://browser:3000"         # §12b headless Chromium renderer (read-only fallback)
 
     owner_id: str = "owner"
     agent_jwt_secret: str = "change-me"
@@ -30,10 +31,12 @@ class Settings(BaseSettings):
     line_api_base: str = "https://api.line.me"
 
     docker_host: str = "http://socket-proxy-ro:2375"
+    ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING
     compose_project: str = "agent-harness"
 
     policy_path: str = "/config/policy.yaml"
     privacy_rules_path: str = "/config/privacy_rules.yaml"
+    authority_path: str = "/config/authority.yaml"
 
     phoenix_collector_endpoint: str = ""   # e.g. http://phoenix:6006/v1/traces
     phoenix_project: str = "agent-harness"

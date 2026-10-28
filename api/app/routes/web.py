@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .. import config, db, pipeline, state
 from ..auth import require_owner
+from ..graphs.grounded import build_grounded_graph
 from ..graphs.main import build_graph
 from ..models import Job, KillSwitch, Override
 from ..settings import get_settings
@@ -102,6 +103,11 @@ async def cancel_run(run_id: str, request: Request, owner: str = Depends(require
     if not meta:
         raise HTTPException(404, "unknown run")
     await state.request_cancel(r, run_id)
+    pending = await state.get_pending(r, meta.get("thread_id", ""))
+    if pending and pending.get("run_id") == run_id:  # waiting for an answer: drop the question
+        await state.clear_pending(r, meta["thread_id"])
+        await state.clear_clarify_ctx(r, meta["thread_id"])
+        await state.set_run_meta(r, run_id, status="cancelled")
     if meta.get("status") == "queued":  # not started yet: also drop it from the queue
         try:
             await ArqJob(run_id, request.app.state.arq, _queue_name=meta["queue"]).abort(timeout=0.5)
@@ -112,9 +118,32 @@ async def cancel_run(run_id: str, request: Request, owner: str = Depends(require
     return {"ok": True}
 
 
+class ResumeRequest(BaseModel):
+    value: str | None = Field(default=None, max_length=100_000)  # None/empty = /skip (answer with an assumption)
+
+
 @router.post("/runs/{run_id}/resume")
-async def resume_run(run_id: str, owner: str = Depends(require_owner)):
-    raise HTTPException(501, "approvals/resume arrive with phase 7 (Inbox + background approvals)")
+async def resume_run(run_id: str, body: ResumeRequest, request: Request, owner: str = Depends(require_owner)):
+    """Answer the grounded graph's clarifying question (§12a). Approvals arrive with phase 7."""
+    r = state.get_redis()
+    meta = await state.get_run_meta(r, run_id)
+    if not meta:
+        raise HTTPException(404, "unknown run")
+    thread_id = meta.get("thread_id", "")
+    pending = await state.get_pending(r, thread_id)
+    if not pending or pending.get("run_id") != run_id:
+        raise HTTPException(409, "this run is not waiting for an answer")
+    value = (body.value or "").strip()
+    job = Job(channel="web", mode="interactive", user_id=owner, thread_id=thread_id, text=value or "/skip",
+              dedupe_key=f"resume:{run_id}:{pending.get('round')}")
+    res = await pipeline.submit(job, request.app.state.enqueue)
+    if res.duplicate:
+        raise HTTPException(409, "duplicate request")
+    if res.command_reply:
+        return JSONResponse({"command_reply": res.command_reply})
+    if "text/event-stream" in request.headers.get("accept", ""):
+        return _stream_response(_event_stream(res.run_id))
+    return {"run_id": res.run_id, "thread_id": thread_id, "decision": res.decision.model_dump()}
 
 
 def _serialize(m: Any) -> dict[str, Any] | None:
@@ -150,11 +179,22 @@ async def hide_thread(tid: str, owner: str = Depends(require_owner)):
 @router.get("/threads/{tid}")
 async def get_thread(tid: str, request: Request, owner: str = Depends(require_owner)):
     thread_id = _thread_id(tid)
-    graph = build_graph(None, [], checkpointer=request.app.state.checkpointer)
+    r = state.get_redis()
+    pol = config.policy()
+    if (pol.get("grounding") or {}).get("enabled"):
+        graph = build_grounded_graph(None, policy=pol, checkpointer=request.app.state.checkpointer)
+    else:
+        graph = build_graph(None, [], checkpointer=request.app.state.checkpointer)
     snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
     msgs = [s for m in (snap.values or {}).get("messages", []) if (s := _serialize(m))]
-    return {"thread_id": thread_id, "messages": msgs,
-            "private": await state.is_thread_private(state.get_redis(), thread_id)}
+    pending = await state.get_pending(r, thread_id)
+    question = None
+    if pending and snap.interrupts:
+        v = snap.interrupts[0].value or {}
+        question = {"run_id": pending["run_id"], "round": v.get("round"), "question": v.get("question"),
+                    "options": v.get("options") or []}
+    return {"thread_id": thread_id, "messages": msgs, "pending": question,
+            "private": await state.is_thread_private(r, thread_id)}
 
 
 class KillSwitchBody(BaseModel):

@@ -1,0 +1,31 @@
+# Source authority tiers for grounded answering (ARCHITECTURE.md §12a). Rules first; the LLM judge only
+# sees URL/title/snippet/claim for `unknown` domains, cached per (domain, entity) for llm_authority_cache_days.
+primary_suffixes: [".gov", ".gov.tw", ".gov.uk", ".europa.eu", ".edu", ".edu.tw"]   # .edu only for the institution itself
+primary_domains:
+  - rfc-editor.org
+  - ietf.org
+  - w3.org
+  - iso.org
+  - law.moj.gov.tw
+  - sec.gov
+  - mops.twse.com.tw
+  - doi.org
+  - arxiv.org
+entity_domains:        # official sites: T1 only for claims about that entity
+  OpenAI: [openai.com, platform.openai.com]
+  Anthropic: [anthropic.com, docs.anthropic.com]
+  Apple: [apple.com]
+  Google: [google.com, blog.google, googleblog.com]
+  Microsoft: [microsoft.com]
+  GitHub: [github.com, docs.github.com, github.blog]
+  Python: [python.org]
+  NVIDIA: [nvidia.com]
+github_orgs:           # github.com/<org> is T1 only for these entities
+  OpenAI: [openai]
+  Anthropic: [anthropics]
+  Microsoft: [microsoft]
+  GitHub: [github]
+  Python: [python]
+  NVIDIA: [NVIDIA]
+secondary_domains: [reuters.com, apnews.com, cna.com.tw, wikipedia.org, bbc.com, bloomberg.com]
+reject_patterns: [medium.com, reddit.com, quora.com, stackoverflow.com, "*.blogspot.com", zhihu.com, pinterest.com]

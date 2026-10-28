@@ -87,7 +87,7 @@ def test_confident_follows_router_tier(policy):
 
 def test_clarify_cap_answers_with_router_tier(policy):
     out = decide(job(), g0(), rr(intent_confidence=0.6, tier="cloud_fast"), "FREE", NO_BUDGET, policy,
-                 clarify_rounds=5)
+                 clarify_rounds=policy["clarify"]["max_rounds"])
     assert (out.route, out.model) == ("chat", "cloud_fast")
     assert any("assumptions" in x for x in out.reasons)
 

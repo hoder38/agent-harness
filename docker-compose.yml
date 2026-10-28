@@ -1,15 +1,15 @@
 name: agent-harness
 
-# MVP = phases 1, 2, 3 + 8 (ARCHITECTURE.md §15). Later phases add media-worker, gpu-governor,
-# sandbox-manager, socket-proxy-rw and syncthing.
+# MVP = phases 1, 2, 3 + 8; + phase 4 gpu-governor, 8a grounded answering, 8b-read browser (ARCHITECTURE.md §15).
+# Later phases add media-worker, sandbox-manager, socket-proxy-rw and syncthing.
 
 x-proxy-env: &proxy-env
   HTTP_PROXY: http://egress-proxy:4750
   HTTPS_PROXY: http://egress-proxy:4750
   http_proxy: http://egress-proxy:4750
   https_proxy: http://egress-proxy:4750
-  NO_PROXY: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,localhost,127.0.0.1,0.0.0.0
-  no_proxy: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,localhost,127.0.0.1,0.0.0.0
+  NO_PROXY: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
+  no_proxy: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
 
 x-app-env: &app-env
   <<: *proxy-env
@@ -33,7 +33,7 @@ x-app-env: &app-env
   TZ: Asia/Taipei
 
 x-app: &app
-  build: ./api
+  build: { context: ./api, target: runtime }
   image: agent-harness-api:latest
   environment: *app-env
   volumes: ["./config:/config:ro"]
@@ -84,6 +84,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  gpu-governor:                              # phase 4 (§11): NVML + steam-headless → gpu_state in Redis
+    image: agent-harness-api:latest          # built by the services above (same code, no secrets needed)
+    command: ["python", "-m", "app.governor"]
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@agent-redis:6379/0
+      DOCKER_HOST: http://socket-proxy-ro:2375
+      OLLAMA_URL: http://ollama:11434
+      POLICY_PATH: /config/policy.yaml
+      TZ: Asia/Taipei
+    volumes: ["./config:/config:ro"]
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [utility] }] } } }
+    restart: unless-stopped
+    networks: [agent]
+    depends_on:
+      agent-redis: { condition: service_healthy }
+      agent-api: { condition: service_started }
+    healthcheck:                             # heartbeat written within the last 30 s
+      test: ["CMD", "python", "-c", "import asyncio,app.state as s; assert asyncio.run(s.get_redis().exists('gpu_governor:heartbeat'))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  agent-test:                                # tests only: docker compose run --rm agent-test [pytest args]
+    profiles: [test]
+    build: { context: ./api, target: test }
+    image: agent-harness-api:test
+    environment: { POLICY_PATH: /config/policy.yaml, PRIVACY_RULES_PATH: /config/privacy_rules.yaml, TZ: Asia/Taipei }
+    volumes: ["./api:/app", "./config:/config:ro"]
+    network_mode: none
 
   ollama:
     image: ollama/ollama:latest
@@ -177,7 +208,27 @@ services:
     restart: unless-stopped
     networks: [agent, egress]
 
-  socket-proxy-ro:                           # read-only Docker API for the health watcher
+  browser:                                   # §12b read-only renderer: headless Chromium, no host ports,
+    build: ./browser                         # internal network only; all page traffic via squid :4751
+    image: agent-harness-browser:latest
+    environment: { BROWSER_PROXY: "http://egress-proxy:4751", BROWSER_CONCURRENCY: "2" }
+    read_only: true
+    tmpfs: ["/tmp:size=512m"]
+    shm_size: 256m
+    mem_limit: 1536m
+    pids_limit: 512
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [agent]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  socket-proxy-ro:                           # read-only Docker API for the health watcher and gpu-governor
     image: tecnativa/docker-socket-proxy:latest
     environment: { CONTAINERS: "1", EVENTS: "1", POST: "0" }
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]

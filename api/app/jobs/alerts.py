@@ -80,10 +80,36 @@ async def check_budget(pol: dict[str, Any]) -> list[tuple[str, str]]:
     return issues
 
 
+async def check_governor(pol: dict[str, Any]) -> list[tuple[str, str]]:
+    """gpu-governor (§11) must keep publishing; otherwise gpu_state is stale."""
+    if not (pol.get("gpu_governor") or {}).get("enabled"):
+        return []
+    raw = await state.get_redis().get("gpu_governor:heartbeat")
+    if not raw:
+        return [("governor:heartbeat", "gpu-governor heartbeat missing: gpu_state may be stale")]
+    err = json.loads(raw).get("error")
+    return [("governor:error", f"gpu-governor cannot read the GPU: {err}")] if err else []
+
+
+async def resume_deferred(ctx: dict[str, Any]) -> int:
+    """§11 'on return to FREE: resume deferred jobs' (PRIVATE background work parked while GAMING)."""
+    r = state.get_redis()
+    if await state.get_gpu_state(r) == "GAMING":
+        return 0
+    jobs = await state.pop_deferred(r)
+    for j in jobs:
+        run_id = j["payload"]["run_id"]
+        await state.set_run_meta(r, run_id, status="queued")
+        await state.emit(r, run_id, "status", {"status": "queued", "reason": "GPU no longer GAMING"})
+        await ctx["redis"].enqueue_job("run_agent", j["payload"], _job_id=f"{run_id}:resume:{int(time.time())}",
+                                       _queue_name=j["queue"])
+    return len(jobs)
+
+
 async def alert_watcher(ctx: dict[str, Any]) -> None:
     pol = config.policy()
     issues: list[tuple[str, str]] = []
-    for check in (check_containers(), check_queues(pol), check_budget(pol)):
+    for check in (check_containers(), check_queues(pol), check_budget(pol), check_governor(pol)):
         try:
             issues += await check
         except Exception as e:

@@ -86,7 +86,7 @@ async def emit(r: aioredis.Redis, run_id: str, type_: str, data: Any = None) -> 
     await r.expire(key, EVENT_TTL_S)
 
 
-TERMINAL = {"done", "error", "cancelled"}
+TERMINAL = {"done", "error", "cancelled", "interrupt"}  # interrupt: the run waits for the user (§12a)
 
 
 async def read_events(r: aioredis.Redis, run_id: str, last_id: str = "0", block_ms: int = 15000) -> AsyncIterator[tuple[str, str, Any]]:
@@ -153,6 +153,46 @@ async def set_clarify_question(r: aioredis.Redis, thread_id: str, question: str)
 
 async def clear_clarify_ctx(r: aioredis.Redis, thread_id: str) -> None:
     await r.delete(f"clarify:{thread_id}")
+
+
+async def clarify_ctx_from_question(r: aioredis.Redis, thread_id: str, question: str, ttl_s: int) -> None:
+    """The grounded graph asked on its own (not via route=clarify): start the context from the request."""
+    if await r.exists(f"clarify:{thread_id}"):
+        await set_clarify_question(r, thread_id, question)
+        return
+    prev = await get_prev_msg(r, thread_id) or {}
+    await set_clarify_ctx(r, thread_id, text=prev.get("text", ""), redacted_text=prev.get("redacted_text", ""),
+                          rounds=1, ttl_s=ttl_s)
+    await set_clarify_question(r, thread_id, question)
+
+
+# ---------------------------------------------------------------- pending clarify (grounded graph interrupt)
+# While set, the thread's next message is the answer to the graph's question and resumes that run.
+async def set_pending(r: aioredis.Redis, thread_id: str, *, run_id: str, round_: int, ttl_s: int) -> None:
+    await r.set(f"pending:{thread_id}", json.dumps({"run_id": run_id, "round": round_, "created_at": time.time()}),
+                ex=ttl_s)
+
+
+async def get_pending(r: aioredis.Redis, thread_id: str) -> dict[str, Any] | None:
+    raw = await r.get(f"pending:{thread_id}")
+    return json.loads(raw) if raw else None
+
+
+async def clear_pending(r: aioredis.Redis, thread_id: str) -> None:
+    await r.delete(f"pending:{thread_id}")
+
+
+# ---------------------------------------------------------------- deferred jobs (resumed when the GPU is not GAMING, §11)
+async def defer_job(r: aioredis.Redis, run_id: str, payload: dict[str, Any], queue: str) -> None:
+    await r.hset("deferred", run_id, json.dumps({"payload": payload, "queue": queue, "at": time.time()}))
+
+
+async def pop_deferred(r: aioredis.Redis) -> list[dict[str, Any]]:
+    out = []
+    for run_id, raw in (await r.hgetall("deferred")).items():
+        if await r.hdel("deferred", run_id):  # only one scheduler wins each job
+            out.append(json.loads(raw))
+    return out
 
 
 # The previous user message is sent to the router as context, so follow-ups ("how much is it?")

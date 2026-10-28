@@ -53,11 +53,14 @@ class BackgroundSettings:
 
 
 class CronSettings:
-    """Scheduler: health/budget watcher every minute (schedules table arrives in phase 11)."""
+    """Scheduler: health/budget/governor watcher every minute; deferred-job resume (§11) every 20 s."""
     redis_settings = _redis
     queue_name = "arq:cron"
     functions = []
-    cron_jobs = [cron(alerts.alert_watcher, second={0}, run_at_startup=True, unique=True, timeout=50)]
+    cron_jobs = [
+        cron(alerts.alert_watcher, second={0}, run_at_startup=True, unique=True, timeout=50),
+        cron(alerts.resume_deferred, second={10, 30, 50}, unique=True, timeout=15),
+    ]
     on_startup = _cron_startup
     on_shutdown = _cron_shutdown
     health_check_interval = 30

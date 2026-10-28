@@ -6,6 +6,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 os.environ.setdefault("POLICY_PATH", str(ROOT / "config" / "policy.yaml"))
 os.environ.setdefault("PRIVACY_RULES_PATH", str(ROOT / "config" / "privacy_rules.yaml"))
+os.environ.setdefault("AUTHORITY_PATH", str(ROOT / "config" / "authority.yaml"))
 os.environ.setdefault("AGENT_JWT_SECRET", "test-secret")
 os.environ.setdefault("OWNER_ID", "owner")
 os.environ.setdefault("LINE_CHANNEL_SECRET", "line-secret")

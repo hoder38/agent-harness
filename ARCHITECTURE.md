@@ -411,6 +411,38 @@ Container with NVML access (`capabilities: [utility]`) and read-only Docker even
 - In-flight local jobs: short ones finish; long ones are requeued on cloud (non-private) or paused.
 - On return to FREE: resume deferred jobs.
 
+### Implemented 2026-10-28 (phase 4)
+- **Where:**
+  - `app/governor.py`, run as compose service `gpu-governor` (same image as the api, `python -m app.governor`).
+  - The NVML device reservation is `capabilities: [utility]`.
+  - Thresholds live in `policy.yaml gpu_governor`.
+- **Polling, not Docker events:** every `poll_s` (2 s) it reads:
+  - NVML (util, encoder util, VRAM);
+  - `steam-headless` via `socket-proxy-ro` (`containers/json` name filter);
+  - Ollama `/api/ps`;
+  - `sem:gpu` (the harness's own GPU jobs).
+- **Transition rules (`Governor.step()`, pure and unit-tested):**
+  - While the harness holds the GPU, its own load does not count as BUSY util.
+  - Free VRAM is computed as total − used + Ollama's own resident models, so a loaded Qwen does not trigger BUSY by itself.
+  - Entering GAMING unloads only Ollama models with `size_vram > 0`.
+- **Redis keys:**
+  - `SET gpu_state` and `PUBLISH gpu_state_changed`;
+  - `LPUSH gpu_governor:transitions` (last 200);
+  - `gpu_governor:heartbeat` (TTL `heartbeat_ttl_s`).
+  - `host/gpu-state.sh FREE|BUSY|GAMING` sets `gpu_state_override`, which wins; `auto` deletes it.
+- **Alerts:** if the heartbeat is missing or reports an error, the alert watcher sends a LINE alert (`governor:heartbeat` / `governor:error`). `gpu_governor.enabled: false` turns this off.
+- **Jobs before start:**
+  - When GAMING and the decision is `local`:
+    - non-private jobs go to `cloud_fast` (`local_cpu` if the kill switch is on);
+    - private interactive jobs go to `local_cpu`;
+    - private background jobs are deferred.
+  - Deferred jobs are stored in the Redis hash `deferred`.
+  - The scheduler cron `resume_deferred` (every 20 s) re-enqueues them once the state is not GAMING.
+- **Jobs in flight:**
+  - A `local` run older than `inflight_short_s` (20 s) when GAMING starts is stopped.
+  - It is then requeued (status `requeued`) on the alternative model and continues from its checkpoint, or deferred if it is private background work.
+  - Shorter runs finish.
+
 ## 12. L9 Verify layer & L10 Approval/Output
 
 Verify (skip for trivial chat):
@@ -424,7 +456,7 @@ Approval:
 
 Output: SSE (web), LINE reply/push (never PRIVATE content), Inbox, memory write, PR link.
 
-## 12a. Grounded answering (clarify → verify claims → cite) — decided 2026-10-22, not yet implemented
+## 12a. Grounded answering (clarify → verify claims → cite) — decided 2026-10-22, implemented 2026-10-28 (phase 8a; default mode cite_only)
 
 Owner preferences, applied to **every** answer:
 1. **Clarify first** whenever intent/scope is uncertain. *Intent* uncertainty → ask the user; *factual* uncertainty → search (never ask "should I search?").
@@ -436,7 +468,7 @@ PRIVATE threads never use web tools; they may cite only the local knowledge base
 
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:
-- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.8, or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (5) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
+- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.8, or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (10, raised from 5 on 2026-10-28) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
 - **Prompt rules:** `GROUNDING_WEB` (one primary source read with `fetch_page`, `[n]` citations, "(unverified)"/「（未驗證）」 labels, exempt kinds) or `GROUNDING_OFFLINE` (no invented sources; one "⚠️ 未驗證" line) on every non-clarify route; the clarify hint asks one question with ≤ 3 options.
 - **Tool caps:** `policy.yaml tool_limits` (`web_search: 3`, `fetch_page: 4`) per user turn; calls over the cap get an error `ToolMessage` without running.
 
@@ -491,7 +523,7 @@ class GroundedState(MessagesState):
 
 ### Node flow
 ```
-START → ingest → assess_ambiguity ──ambiguous & clarify_used<5──▶ ask_user (interrupt) ──resume──┐
+START → ingest → assess_ambiguity ──ambiguous & clarify_used<10─▶ ask_user (interrupt) ──resume──┐
                       │◀──────────────────────────────────────────────────────────────────────────┘
                       ▼ clear, or cap reached → assumptions
                     draft → extract_claims ──no factual claims──────────────────────────────▶ compose
@@ -510,7 +542,7 @@ A `budget_guard` conditional edge sits before every costly node and routes to `c
 | Node | Kind | Behaviour |
 |---|---|---|
 | `ingest` | code | reset per-turn state; `private/channel/model` injected from `Decision` |
-| `assess_ambiguity` | LLM, structured, T=0 | → `{ambiguous, slot, question_to_user, options[≤3], assumption_if_skipped}`. Ambiguous if: unclear referent; missing time/region/version that changes the answer; ≥2 plausible readings with different answers; conflicting constraints; `force_clarify`. One question per round |
+| `assess_ambiguity` | LLM, structured, T=0 | → `{ambiguous, slot, question_to_user, options[≤3], assumption_if_skipped}`. Ask if: unclear referent; missing time/region/version that changes the answer; ≥2 plausible readings with different answers; conflicting constraints; `force_clarify`; and (since 2026-10-28) for advice/plans/recommendations/how-to, any missing detail that would change or personalise the answer (goal, audience, level, budget, platform, constraints). Most important first, one question per round, re-assessed after each answer; never for greetings or simple one-answer facts. A question matching an earlier one in the turn ends clarifying (no loops) |
 | `ask_user` | `interrupt()` | `clarify_used += 1`; resume value → `clarifications[-1].answer`, merged into `question`. At the cap, `assumption_if_skipped` → `assumptions` |
 | `draft` | LLM | internal draft (`tags=["internal"]`; the worker does not emit its tokens) |
 | `extract_claims` | LLM + code override | atomic claims + kind. Code forces `factual` for sentences with numbers, dates, prices, versions, or named entity + factual verb |
@@ -584,20 +616,24 @@ LINE uses the same structure without markdown; PRIVATE threads still send `priva
 - `AsyncPostgresSaver`, `thread_id = job.thread_id`; every node checkpoints; budget counters live in state and the ledger lives in Redis, so crashes/retries resume without double charging.
 - `ask_user`: `interrupt({"type": "clarify", "round", "question", "options", "private"})`.
 - Worker: `astream(..., stream_mode=["messages", "updates"])`; on `__interrupt__` → emit SSE `interrupt`, `runmeta.status = awaiting_input`, Redis `pending:{thread_id} = {run_id, round, created_at}` (TTL 24 h). LINE replies with the question (PRIVATE → `private_line_notice`). Waiting time is not counted in `active_ms`.
-- Pipeline: after commands, if `pending:{thread_id}` exists, the next message (web or LINE) is the **answer**; Gate 0 still runs, then a resume job (new `run_id`, `parent_run_id`) runs `astream(Command(resume=text), cfg)`. `/skip` resumes with `None` → answer using `assumption_if_skipped`.
+- Pipeline: after commands, if `pending:{thread_id}` exists, the next message (web or LINE) is the **answer**; Gate 0 still runs, then a resume job (new `run_id`, `parent_run_id`) runs `astream(Command(resume=text), cfg)`. `/skip` (or an empty web resume) resumes with the sentinel `"/skip"`, because `Command(resume=None)` counts as "no resume" and re-raises the interrupt. The graph then answers using `assumption_if_skipped`.
 - Pending expired → the next message starts a new turn (clear the pending task first if needed; see §17).
 - Web: `POST /runs/{run_id}/resume {value}`; `useAgentThread` renders the question + option buttons on `interrupt`. Cancel deletes `pending:{thread_id}`.
 
 ### Cost limits (`policy.yaml`, per user turn across resumes)
 ```yaml
 tool_limits: { web_search: 3, fetch_page: 4 }   # already used by the MVP graph
-clarify: { max_rounds: 5, context_ttl_s: 86400 } # already used by the MVP decision layer
+clarify: { max_rounds: 10, context_ttl_s: 86400 } # already used by the MVP decision layer
 grounding:
   enabled: true
   per_turn: { max_usd: 0.05, max_active_s: 90 }  # search/fetch/clarify caps come from the keys above
   reserve_for_compose: { usd_fraction: 0.2, seconds: 15 }
   brave_usd_per_query: 0.0          # VERIFY plan price
   llm_authority_cache_days: 30
+  max_claims: 8                     # factual claims checked per turn; the rest are labelled unverified
+  pending_ttl_s: 86400              # an unanswered clarifying question expires after this
+  local_think_tasks: []             # Qwen thinking per step on local; off (see Implementation notes)
+  local_think_tokens: 2048
 executor:
   recursion_limit: 60               # 5 clarify rounds ×2 + 3 research loops ×5 + fixed nodes ≈ 35
 ```
@@ -605,6 +641,59 @@ executor:
 - Each node checks `active_ms + elapsed > (max_active_s − reserve.seconds)·1000`.
 - Local models cost $0 and are bounded only by time and counts. Daily provider budgets, kill switch, and GPU semaphore still apply first.
 - Exhaustion → `budget.exhausted` is set and the answer ends with "⚠️ Verification limit reached ({reason}); some content is unverified."
+
+### Light mode `grounding.mode: cite_only` (default since 2026-10-28)
+The owner found per-claim verification too heavy: 17–30 s per turn and long "Unverified" lists on the 9B model. Preference 2 (one primary source per claim) and preference 3 (an explicit unverified label) are relaxed to "cite the pages you read".
+- **Flow:** `ingest → assess_ambiguity ⇄ ask_user/wait_answer → research → compose → final_check`.
+- **research:**
+  - One LLM call returns `{needs_web, entity, queries ≤ 2}`.
+  - Even if the model says no, the turn searches anyway when `_FACT_HINT` matches.
+  - It then searches, ranks hits by authority tier (rules only; rejected domains are dropped) and fetches up to `cite_pages` pages of `cite_chars` each.
+  - PRIVATE threads do no web access.
+- **compose:** answers with `[n]` after sentences taken from a source, and may use general knowledge without a number.
+- **final_check:** URL and `[n]` validity only (recompose once, then strip).
+- **Output:**
+  - Cited sources are renumbered 1..k in order of first use and listed at the end.
+  - The verdict is `cited`, `uncited` or `no_sources`.
+- **Unchanged:** clarify, resume, `/skip`, caps and streaming.
+- **Live timing:** 1–5 s per turn.
+- `mode: verify` keeps the full graph described above.
+
+### Implementation notes (2026-10-28)
+Deviations from, and details beyond, the design above:
+- **Graph shape and history:**
+  - `interpretation_conflict` runs before `compose`.
+  - State lists are replaced wholesale (no reducers).
+  - LLM history is plain user/assistant text (`plain_history`; no tool messages).
+- **Sources and privacy:**
+  - Only T1 candidates are fetched.
+  - On PRIVATE threads, every factual claim is labelled unverified (`private_kb`) until §10a ships.
+- **Streaming:**
+  - Only `compose` tokens are streamed. A retry emits SSE `reset` first.
+  - Exempt-only answers (e.g. greetings) arrive in `done` only.
+  - `done.grounding` = `{verdict, citations, unverified, budget}`.
+- **Clarify replies:**
+  - A digit reply maps to that option's text.
+  - An empty reply or `/skip` sets `skip_clarify`.
+  - The reply message id is `reply-{run_id}-{n}`.
+- **Resume:** the pipeline checks `pending:{thread}` before commands. On resume:
+  - decision rule 3 (clarify) is skipped;
+  - `decisions.inputs.resume_of` is logged;
+  - the parent run's status becomes `answered`.
+- **Search tries:** each claim is searched at most twice (`MAX_TRIES`); queries already run in this turn are not repeated.
+- **Numeric check:**
+  - Month names next to a digit count as numbers, so "October 2, 2023", "Oct. 2, 2023" and 「2023年10月2日」 match each other.
+  - Dotted versions (e.g. `3.12.0`) are kept as one number.
+- **Local Qwen (qwen3.5:9b):**
+  - Every grounded call sends `think: false`, because with thinking on the model spends all of `max_tokens` on hidden reasoning and returns empty content.
+  - `grounding.local_think_tasks` re-enables thinking per step with `local_think_tokens` extra headroom, but [verify_support, compose] measured about 140 s per turn (over `max_active_s`) with empty answers, so it is `[]`.
+  - The draft and compose prompts state the answer language explicitly; the 9B model drifted to Chinese on "the user's language".
+  - Claim rows are given to compose as `(true) … [n]` / `(false) … source [n] says` / `(unchecked) …`, so the model doesn't copy "VERIFIED" labels into the answer.
+- **Measured live (2026-10-28, local GPU):**
+  - simple factual turn: 17–30 s;
+  - clarify interrupt: about 1 s.
+  - Verification quality is bounded by the 9B model. Wrong drafts are caught (labelled "source says …" or corrected), but a supported claim is sometimes left unverified.
+- **Tests:** 35 grounded tests in `test_grounded.py` and `test_grounded_worker.py`. They use a task-dispatching fake chat model instead of `GenericFakeChatModel`, and run via `docker compose run --rm agent-test`.
 
 ### Tests (pytest + `GenericFakeChatModel` + `InMemorySaver` + `fakeredis`; monkeypatch `search_web`/`fetch_source`)
 | Area | Cases |
@@ -615,6 +704,113 @@ executor:
 | Partial | 1 of 3 claims verified → `partial` with 2 reasons; greeting/creative only → no search, `exempt_only`; poem + one fact → only the fact needs a source; PRIVATE (KB missing) → no web calls, all facts unverified |
 | Budget | 5 queries needed → stops at 3, `exhausted=search`; 6 fetches → 4, cache hits free; USD estimate over 80 % → skip research but still compose, total ≤ $0.05; active time 76 s → compose, ≤ 90 s; arq `Retry` replay → ledger hit, no double count; Brave 429 → one unit, no loop |
 | Check / regression | URL not in `sources` → repair, then downgrade; existing `test_graph.py` / `test_pipeline_worker.py` (cancel, kill switch, LINE delivery, `repair_tool_calls`) pass; checkpoint with 3 sources < 100 KB |
+
+## 12b. Browser — decided 2026-10-28 (8b-read implemented 2026-10-28; 8b-login planned)
+
+The owner wants the agent to read JavaScript-heavy pages now, and later to log in to sites and act on them. These are two stages with very different risk.
+
+### Stage 1 — read-only rendering (implemented 2026-10-28)
+- **Service:** `browser` (`browser/`, image pinned to `mcr.microsoft.com/playwright/python:v1.64.1-noble`). It is a FastAPI wrapper around headless Chromium.
+  - `POST /render {url, timeout_s, settle_ms}` → `{final_url, status, title, html}`; `GET /healthz`.
+  - Each request gets one fresh incognito context: no cookies, storage, service workers or downloads survive it. Images, media and fonts are skipped. At most 2 renders run at once.
+- **Isolation:**
+  - It sits on the `agent` (internal) network only and has no host ports.
+  - Chromium's only route out is the squid open port `egress-proxy:4751`, which refuses private, LAN, metadata and Docker addresses. `--proxy-bypass-list=<-loopback>` forces even `127.0.0.1` through squid.
+  - The container is `read_only`, with a tmpfs `/tmp`, `cap_drop: ALL`, `no-new-privileges`, `mem_limit` 1.5 GB and `pids_limit`.
+  - Verified live: loopback, internal services, 192.168.x and 169.254.169.254 all get a squid 403, which the harness discards.
+- **Use (fallback only):** `tools/browser.py`, called from `fetch_source` (grounded graph) and `fetch_page` (ReAct).
+  - The browser is used only after a plain fetch, when that fetch returned HTML with fewer than `browser.min_text_chars` characters of text (a JS shell) or a status in `browser.render_on_status` (`[403]`).
+  - The rendered text replaces the plain one only if it is longer, and is still subject to `check_url`, `<untrusted>` wrapping and the fetch cache. The result carries `rendered: true`.
+  - If the renderer is down or fails, the plain result stands.
+- **Cost:** about 0.5–3 s per rendered page, and 0 for normal pages. It runs on the CPU, so the GPU governor is unaffected.
+- **Policy:** `browser: {enabled, min_text_chars: 500, render_on_status: [403], timeout_s: 20, settle_ms: 1500}`.
+
+### Stage 2 — interactive browsing and login (phase 8b-login, planned; not built)
+Goal: the agent can navigate, click, fill forms and use sites where the owner is logged in (for example check an order, read a dashboard, download a statement). Design decisions:
+- **Separate service `browser-session`.** It is not the stage-1 renderer, so read-only research can never touch a logged-in profile.
+  - It also sits on the internal network only and uses squid, but with **its own per-site allowlist** (`config/browser_sites.yaml`: domain → profile, allowed actions). Navigation outside the listed domains is blocked in the browser (route abort) and in squid (a separate port with a dstdomain ACL).
+- **Profiles and credentials:**
+  - One Playwright persistent context (`storage_state`) per site. It is stored encrypted (age/Fernet, key in `.env`) in a Docker volume, never in Postgres or Redis and never in prompts or logs.
+  - The owner logs in **once, by hand**, through a noVNC view of the session browser (host-only port or nginx behind nodeReact auth). The agent never sees or types passwords.
+  - 2FA and CAPTCHA are always handed back to the owner via the same view, with a LINE or web notification.
+  - There is no password manager integration in the first cut.
+- **Tools (structured, node-called, like §12a):**
+  - `open(site, path)`, `snapshot()` (accessibility tree + text, capped; the screenshot goes to the owner only), `click(ref)`, `type(ref, text)`, `select(ref, value)`, `back()`, `download()`.
+  - Element refs come from the snapshot (Playwright aria refs), not free-form selectors chosen by the LLM.
+- **Approvals (§16 taint rules apply; all page content is untrusted):**
+  - **Read actions** (navigate within the site, open details, paginate) are auto-allowed, within a per-run cap on steps and seconds.
+  - **Write actions** (submit a form, buy, send, delete, change a setting, any POST that is not a search) need `interrupt()` approval. The owner sees a summary and a screenshot in the `/Agent` page and LINE, then approves or rejects.
+  - Sites can be marked `read_only: true` in `browser_sites.yaml`, which forbids write actions entirely.
+  - Money and credential pages (checkout, password, payment settings) are blocked unless explicitly allowed per site.
+- **PRIVATE:** a logged-in session's content is treated as PRIVATE (local model only, no cloud) unless the site entry says otherwise. Downloads land in a quarantine dir and go to the media pipeline (phase 9).
+- **Audit:** every action is logged with URL, action, ref, approval id and a screenshot hash in Postgres. A per-site kill switch is part of the global kill switch (§19).
+- **Acceptance:**
+  - Owner logs in via noVNC once and the session survives restarts.
+  - The agent reads an order list on an allowlisted site.
+  - Any submit pauses for approval.
+  - Navigation to a non-listed domain is blocked.
+  - A cloud model never receives logged-in page text unless the site is marked non-private.
+
+## 12c. Shopping — clarify intent and budget, recommend real listings — implemented 2026-10-28 (phase 8c)
+
+**Goal:** "幫我推薦調味料罐" should end with 3–5 real products the owner can buy. Each one shows its real price, store, rating and link. Before that, the bot asks for whatever is missing (item and budget). It is a branch of the grounded graph (§12a), so the web clarify UI and LINE resume work unchanged.
+
+- **Flow:** `ingest → shop_slots → (ask_user ⇄ wait_answer → shop_slots) → shop_search → shop_compose → shop_check → END`. Non-shopping turns fall through to `assess_ambiguity` as before. Private threads never shop.
+- **Trigger:** a narrow hint (推薦/想買/預算/價位/入手/比價/送禮…, recommend/buy/budget). "Price" alone does not trigger it, so factual price questions stay on the §12a path. A follow-up within `session_ttl_s` (30 min), such as "cheaper" or "another brand", refines the last search.
+- **Slots (one LLM call, JSON):** item, item_specific, search_terms (1–2 store keywords), budget_min/max, no_budget, use_case, brand_pref, must_have, avoid, remember. Code enforces the following, because a 9B model gets these wrong:
+  - Budget and brand words (知名品牌/有品牌) are stripped from the search terms. Budgets become a price filter and brand preference becomes ranking.
+  - An explicit budget in the user's own lines (`parse_budget`: 1000以下, 300到600, 大概1000, 2千以上, under $500) overrides the model's reading. The newest clarify answer wins.
+  - `item_specific=false` is ignored when a search term of 3+ characters appears verbatim in the user's words, so "電動胡椒研磨器" is never asked about again.
+  - `no_budget` only counts if the user said 不限/隨便/any. Otherwise the bot asks.
+  - Clarify asks one question per round, in a fixed order, up to `max_clarify_rounds` (10):
+    1. item, then budget. Each is asked at most twice, and the question is always about only that slot.
+    2. use case (who it's for / where it's used)
+    3. 1–2 key specs the model picks for the item type (spec:容量, spec:尺寸, spec:材質…)
+    4. must-have / must-avoid features
+    5. brand (skipped if a preference is saved)
+    6. store (buttons: PChome / momo / Yahoo / 不限). The choice limits which stores are searched.
+  - Anything the user already said or answered (including 不限) is not asked. The model's per-slot questions are carried across rounds within the turn. A question too similar to one already asked is skipped (≥ 50 % shared bigrams). If the model forgets to fill a slot, the user's answer fills it.
+  - When the model gives no question for a slot, a default question is used (except for spec). Once a budget is known, a question that mentions price falls back to that default. Options appear as buttons, never in the question text. Skip searches immediately with what is known.
+  - A turn that started shopping stays shopping through its clarify answers (「要降噪」 alone is not a shopping request). Later-turn refinements ("cheaper") do not ask again.
+  - A refine keeps the previous slots and never re-asks for an item that is already known. "Cheaper" (便宜一點/cheaper) always lowers the ceiling to below what was shown (`budget_max`×0.7) and clears the floor.
+  - Standing preferences ("以後都這樣", "always") go to Redis `shop:prefs`. If the model leaves `remember` empty, the stated brand_pref/avoid is saved anyway. Saved preferences apply to later searches.
+- **Stores (`tools/shop.py`):** each adapter is a URL builder plus a parser. All of them search server-side with a price filter and need no login:
+
+  | Store | Source | Price filter |
+  |---|---|---|
+  | PChome 24h | JSON API `ecshweb.pchome.com.tw/search/v4.3` | `&price=lo-hi` |
+  | momo | schema.org ItemList (JSON-LD) in the search page | `&_advPriceS/E` |
+  | Yahoo購物中心 | schema.org ItemList (JSON-LD) | `&minp/&maxp` |
+
+  - Shopee is excluded because it redirects bots to a CAPTCHA (§12b bot wall).
+  - feebee and BigGo expose only aggregate data. They could be added later as price-comparison sources.
+  - Fetches go through squid. Results are cached in Redis for `cache_s`. Out-of-stock and out-of-range listings are dropped, duplicates are merged, and stores are interleaved round-robin.
+- **Relevance (code):** stores pad results with loosely related goods ("電動" → 沖牙器, 起子機).
+  - Bare modifiers are dropped from search terms (a term needs at least 2 character bigrams or words).
+  - A listing is kept only if its name contains at least `min_relevance` (0.5) of a term's bigrams. Results are sorted by relevance, then by brand preference.
+  - The top `max_candidates` (15) go to the model.
+- **Real listings only:**
+  - The model sees numbered listings and writes only `[n] why it fits` lines plus one tip.
+  - Code renders each pick's name, NT$price, store, ★rating and URL from the adapter data.
+  - Unknown numbers and non-listing URLs are dropped.
+  - The answer ends with the search criteria and "prices as of <time>, check the product page".
+  - `shop_check` recomposes once if no valid pick was made. With no listings, the bot says so and suggests adjustments; it never names products.
+  - `answer.products` holds the picks; they also fill `citations` for the UI source count.
+- **Measured live (qwen3.5:9b, web):** about 3–4 s to ask for the budget, then 6–9 s to recommend.
+  - Full clarify, live: "想買保溫杯" asked budget → use → capacity → brand → store (5 rounds, about 4–10 s each), then gave 5 matching 480–500 ml cups at NT$400–600. "推薦藍牙耳機 3000以下 送禮用" did not ask about use (送禮 was already given). It asked about features → fit → battery → brand → store, then picked in-ear ANC models.
+  - Multi-turn test: "想買電動胡椒研磨器" → budget question → "1000 左右" gave 4 grinders at NT$879–959. "便宜一點" then gave 5 grinders at ≤ NT$600. "我偏好有品牌的，以後都這樣" then gave branded picks.
+- **Policy:** `shopping:` in `config/policy.yaml` (enabled, stores, max_clarify_rounds, max_candidates, min_relevance, picks, per_store, cache_s, session_ttl_s).
+- **Tests:** `api/tests/test_shopping.py`:
+  - parser, budget, stock and duplicate filtering;
+  - ask budget → only real listings rendered, invented numbers and URLs dropped;
+  - refine, and "cheaper" overriding a model that raises the floor;
+  - relevance filter;
+  - no_budget guard;
+  - one detail per round in order, reworded duplicates skipped, Skip stops asking, mid-clarify answers stay in shopping;
+  - standing-preference fallback;
+  - budget parser, and a model that drops the budget or brand;
+  - non-shopping turns, private threads.
+- **Later:** product cards in `/Agent` (image, price, button) from `answer.products`; feebee/BigGo price comparison; price-drop watch as a scheduled job; LINE flex carousel.
 
 ## 13. Docker Compose (skeleton)
 
@@ -734,10 +930,12 @@ agent-harness/
           graphs/{main,grounded,grounded_state,chat,assistant,coding,verify}.py
           gates/{gate0,gate1_qwen,jev_router}.py  decision.py
           jobs/  memory/  rag/  tools/  mcp_server/  llm/
+          tools/shop.py      # §12c store adapters (PChome, momo, Yahoo)
     tests/
     langgraph.json
   media/               # media-worker
   governor/            # gpu-governor
+  browser/             # §12b read-only renderer (Playwright/Chromium)
   sandbox-manager/     # + sandbox image Dockerfile
   host/                # copilot hooks + install script
 ```
@@ -752,12 +950,15 @@ re-prioritise remaining phases from real usage and the decision log.
 | 1 | Compose skeleton: postgres, redis, ollama, **litellm**, **phoenix**, **egress-proxy**, agent-api; one ReAct chat graph; SSE; minimal React chat page in nodeReact | Chat streams tokens; thread survives agent-api restart; trace visible in Phoenix; non-allowlisted domain blocked |
 | 2 | Gate 0 + Jev router + decision layer (+ Qwen fallback router; Gate 1 stub only); `decisions` logging + replay tool | Unit tests for `decide()` cover every rule; Jev outage → fallback works |
 | 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
-| 4 | gpu-governor + Ollama unload | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
+| 4 | gpu-governor + Ollama unload — **implemented 2026-10-28** (§11; live GAMING test with `steam-headless` pending) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
 | 5 | Coding route: sandbox-manager + Copilot ACP + verify + approval | Task produces diff, harness-run tests pass, push blocked until approved |
 | 6 | Copilot ingest hooks + harness-memory MCP | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
 | 7 | Todos + Inbox + background approvals | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
 | 8 | LINE channel + **health alerts** | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
-| 8a | Grounded answering (§12a): clarify interrupt/resume (web + LINE), claim extraction, authority tiers, per-turn caps | §12a test table passes; ambiguous question asks before answering; every factual claim has one T1 citation or an "Unverified" label; caps never exceeded |
+| 8a | Grounded answering (§12a): clarify interrupt/resume (web + LINE), claim extraction, authority tiers, per-turn caps — **implemented 2026-10-28** (web verified live; LINE resume not yet tested live) | §12a test table passes; ambiguous question asks before answering; every factual claim has one T1 citation or an "Unverified" label; caps never exceeded |
+| 8b-read | Browser rendering fallback (§12b stage 1) — **implemented 2026-10-28** | JS-only page returns text via `browser`; private/loopback/metadata URLs blocked by squid; normal pages not rendered |
+| 8b-login | Interactive browsing + owner login (§12b stage 2) — planned | §12b stage 2 acceptance list |
+| 8c | Shopping: clarify item/budget, recommend real store listings (§12c) — **implemented 2026-10-28** (web verified live; LINE not yet tested live) | A missing budget is asked with option buttons; every pick is a real listing with code-rendered price/store/link; 「cheaper」 lowers the ceiling; unrelated listings are filtered |
 | 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
@@ -778,6 +979,7 @@ re-prioritise remaining phases from real usage and the decision log.
   - Data from PRIVATE sources may not be passed to tools that send to the outside world in the same run without approval.
 - LINE: signature verification + owner allowlist. Events: HMAC. Web: nodeReact auth.
 - `agent-api` host port bound to `127.0.0.1` only.
+- Browsers (§12b): no host ports, internal network only, egress only via squid (private IPs denied); the read-only renderer keeps no state between requests and never holds logins.
 - Audit log of every tool call and decision in Postgres.
 
 ## 17. Open items to VERIFY
@@ -790,7 +992,12 @@ re-prioritise remaining phases from real usage and the decision log.
 - Copilot CLI: honours `HTTPS_PROXY`; least-privilege token type; usage/credit field names in events and OTel.
 - Name of the nodeReact nginx Docker network.
 - Obsidian Importer: Notion API support and database → Bases mapping; linuxserver/obsidian image.
-- §12a: Brave `freshness` parameter and per-query price; `__interrupt__` key in the `updates` stream and `Command(resume=…)` behaviour in the pinned langgraph version; what happens when new input is sent to a thread with a pending interrupt (else clear it via `aupdate_state`); whether the LINE reply token outlives a clarify round (else use push); local KB (§10a) timeline for PRIVATE verification.
+- §12a: Brave `freshness` parameter and per-query price; whether the LINE reply token outlives a clarify round (else use push); local KB (§10a) timeline for PRIVATE verification.
+  - Resolved 2026-10-28 (langgraph 1.2.16):
+    - interrupts arrive as `updates` `{"__interrupt__": (Interrupt(...),)}`;
+    - `Command(resume=None)` re-raises the interrupt, so the sentinel `"/skip"` is used;
+    - new input on a thread with a pending interrupt restarts from START, so no `aupdate_state` is needed.
+- §11: whether `capabilities: [utility]` alone gives NVML on every driver. It works on the RTX 5060 Ti host as of 2026-10-28; fall back to `[gpu, utility]` if not.
 
 ## 18. Adopted improvements (decided 2026-10-20)
 

@@ -19,6 +19,7 @@ def decide(
     policy: dict[str, Any],
     killswitch: KillSwitch = "off",
     clarify_rounds: int = 0,
+    resuming: bool = False,
 ) -> Decision:
     th = policy.get("thresholds", {})
     providers: dict[str, str] = policy.get("providers", {"cloud_fast": "openai", "cloud_strong": "anthropic"})
@@ -73,7 +74,9 @@ def decide(
     if router.ambiguous > amb_th:
         why.append(f"ambiguous {router.ambiguous:.2f} > {amb_th}")
     if why and "route" not in locked:
-        if clarify_rounds >= max_rounds:
+        if resuming:
+            reasons.append(f"3: {' & '.join(why)} but this answers the graph's question → the graph decides")
+        elif clarify_rounds >= max_rounds:
             reasons.append(f"3: {' & '.join(why)} but {clarify_rounds} clarify rounds used "
                            "→ answer with stated assumptions")
         else:

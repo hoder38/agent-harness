@@ -30,3 +30,7 @@ def policy() -> dict[str, Any]:
 
 def privacy_rules() -> dict[str, Any]:
     return load_yaml(get_settings().privacy_rules_path)
+
+
+def authority() -> dict[str, Any]:
+    return load_yaml(get_settings().authority_path)

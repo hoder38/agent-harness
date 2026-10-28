@@ -123,6 +123,14 @@ class SlowFake(GenericFakeChatModel):
             yield chunk
 
 
+@pytest.fixture
+def react(monkeypatch):
+    """Run the MVP ReAct graph (grounding disabled)."""
+    from app.jobs import worker
+
+    monkeypatch.setattr(worker, "_use_grounded", lambda pol: False)
+
+
 async def _events(r, run_id):
     out = await r.xrange(f"run:{run_id}")
     return [(f["type"], json.loads(f["data"])) for _, f in out]
@@ -133,7 +141,7 @@ async def _prepare(redis, enq, text="hello"):
     return enq.calls[-1]["payload"], res.run_id
 
 
-async def test_worker_streams_tokens_and_persists_thread(redis, enq, monkeypatch):
+async def test_worker_streams_tokens_and_persists_thread(redis, enq, monkeypatch, react):
     from app.jobs import worker
 
     monkeypatch.setattr(worker, "make_llm", lambda alias, ks: SlowFake(messages=iter([AIMessage("x")]), delay=0))
@@ -146,7 +154,7 @@ async def test_worker_streams_tokens_and_persists_thread(redis, enq, monkeypatch
     assert evs[-1][1]["text"].strip().endswith("ten")
 
 
-async def test_worker_cancel_stops_mid_stream(redis, enq, monkeypatch):
+async def test_worker_cancel_stops_mid_stream(redis, enq, monkeypatch, react):
     from app.jobs import worker
 
     monkeypatch.setattr(worker, "make_llm", lambda alias, ks: SlowFake(messages=iter([AIMessage("x")]), delay=0.1))
@@ -196,7 +204,7 @@ def router_seq(monkeypatch):
     return seen, confs
 
 
-async def test_answer_to_clarifying_question_is_rerouted_with_context(redis, enq, router_seq, monkeypatch):
+async def test_answer_to_clarifying_question_is_rerouted_with_context(redis, enq, router_seq, monkeypatch, react):
     from app.jobs import worker
 
     seen, confs = router_seq
@@ -216,9 +224,11 @@ async def test_answer_to_clarifying_question_is_rerouted_with_context(redis, enq
 
 async def test_clarify_rounds_are_capped(redis, enq, router_seq):
     _, confs = router_seq
-    confs += [0.4] * 6
-    routes = [(await pipeline.submit(job(f"m{i}", key=f"k{i}"), enq)).decision.route for i in range(6)]
-    assert routes == ["clarify"] * 5 + ["chat"]
+    from app import config
+    n = int(config.policy()["clarify"]["max_rounds"])
+    confs += [0.4] * (n + 1)
+    routes = [(await pipeline.submit(job(f"m{i}", key=f"k{i}"), enq)).decision.route for i in range(n + 1)]
+    assert routes == ["clarify"] * n + ["chat"]
 
 
 async def test_private_clarify_question_stays_out_of_redacted_routing_text(redis, enq, router_seq):

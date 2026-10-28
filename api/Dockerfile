@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 TZ=Asia/Taipei
 WORKDIR /app
@@ -8,6 +8,15 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 RUN useradd -u 1000 -m agent
+
+# Test image: `docker compose run --rm agent-test` (source + tests are bind-mounted).
+FROM base AS test
+COPY requirements-dev.txt .
+RUN pip install -r requirements-dev.txt
+USER agent
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+FROM base AS runtime
 COPY --chown=agent:agent . .
 USER agent
 

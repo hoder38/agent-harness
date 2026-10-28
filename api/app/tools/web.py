@@ -11,6 +11,7 @@ import httpx
 from langchain_core.tools import tool
 
 from ..settings import get_settings
+from . import browser
 
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 MAX_PAGE_CHARS = 8000
@@ -113,26 +114,34 @@ async def fetch_page(url: str) -> str:
     if err := check_url(url):
         return err
     s = get_settings()
+    status, ctype, body = None, "", ""
     try:
         async with httpx.AsyncClient(proxy=s.fetch_proxy, trust_env=False, timeout=20, follow_redirects=True,
                                      headers={"User-Agent": "Mozilla/5.0 (agent-harness fetch_page)"}) as client:
             async with client.stream("GET", url) as r:
-                if r.status_code != 200:
-                    return f"Fetch failed: HTTP {r.status_code}"
-                ctype = r.headers.get("content-type", "").lower()
-                if not any(t in ctype for t in ("text/", "json", "xml")):
-                    return f"Unsupported content type: {ctype or 'unknown'}"
-                buf = bytearray()
-                async for chunk in r.aiter_bytes():
-                    buf += chunk
-                    if len(buf) >= MAX_DOWNLOAD_BYTES:
-                        break
-                body = buf.decode(r.encoding or "utf-8", errors="replace")
+                status, ctype = r.status_code, r.headers.get("content-type", "").lower()
+                if status == 200 and any(t in ctype for t in ("text/", "json", "xml")):
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        if len(buf) >= MAX_DOWNLOAD_BYTES:
+                            break
+                    body = buf.decode(r.encoding or "utf-8", errors="replace")
     except httpx.ProxyError:
         return "Fetch blocked by the egress proxy (private or disallowed address)."
     except httpx.HTTPError as e:
         return f"Fetch failed: {type(e).__name__}"
-    title, text = html_to_text(body) if "html" in ctype else ("", body)
+    title, text = (html_to_text(body) if "html" in ctype else ("", body)) if body else ("", "")
+    if browser.should_render(status, ctype, text) and (rd := await browser.render(url)):
+        rtitle, rtext = html_to_text(rd["html"])
+        if len(rtext) > len(text) and not check_url(rd["final_url"]) and not browser.is_bot_wall(rd["final_url"], rtitle, rtext):
+            status, ctype, body, title, text = 200, "text/html", rd["html"], rtitle, rtext
+    if status != 200:
+        return f"Fetch failed: HTTP {status}"
+    if not body:
+        return f"Unsupported content type: {ctype or 'unknown'}"
+    if browser.is_bot_wall(url, title, text):
+        return "Fetch failed: blocked by bot protection (CAPTCHA); use another source."
     truncated = len(text) > MAX_PAGE_CHARS
     text = text[:MAX_PAGE_CHARS] + ("\n[truncated]" if truncated else "")
     return f'<untrusted source="{url}" title="{html.escape(title)}">\n{text}\n</untrusted>'

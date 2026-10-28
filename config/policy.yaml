@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: "2026-10-22.2"
+version: "2026-10-28.2"
 
 thresholds:
   clarify_below: 0.8      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -9,14 +9,59 @@ thresholds:
   risky: 0.5              # router risky above this -> risky=True
 
 clarify:
-  max_rounds: 5           # after this many clarify turns in a row, answer with stated assumptions
+  max_rounds: 10          # after this many clarify turns in a row, answer with stated assumptions
   context_ttl_s: 86400    # how long the next message counts as the answer to a clarifying question
   previous_ttl_s: 3600    # the previous message is sent to the router as context for this long
 
-# Per-run caps on tool calls (one user turn).
+# Per-turn caps on tool calls (one user turn, across clarify resumes).
 tool_limits:
   web_search: 3
   fetch_page: 4
+
+# Grounded answering (§12a): clarify → verify claims → cite. enabled=false falls back to the ReAct graph.
+grounding:
+  enabled: true
+  # cite_only (default): clarify -> search -> read cite_pages pages -> answer with [n] citations; no per-claim
+  #   checks or "Unverified" list. verify: full §12a claim verification (slower, noisier on the 9B model).
+  mode: cite_only
+  cite_pages: 2                     # pages read per turn (also capped by tool_limits.fetch_page)
+  cite_chars: 4000                  # excerpt chars per page given to the model
+  per_turn: { max_usd: 0.05, max_active_s: 90 }
+  reserve_for_compose: { usd_fraction: 0.2, seconds: 15 }
+  brave_usd_per_query: 0.0          # VERIFY plan price
+  llm_authority_cache_days: 30
+  max_claims: 8                     # factual claims checked per turn; the rest are labelled unverified
+  pending_ttl_s: 86400              # an unanswered clarifying question expires after this
+  # Qwen3.x thinking on local (GPU) for the listed steps only; others run with think=false. Thinking eats
+  # max_tokens, so these calls get local_think_tokens extra. Never on local_cpu. Measured 2026-10-28 with
+  # [verify_support, compose] on qwen3.5:9b: ~140 s/turn, blows max_active_s, empty answers -> keep off.
+  local_think_tasks: []
+  local_think_tokens: 2048
+
+# §12c shopping: requests to choose/buy a product (推薦/想買/預算/… hints, or a follow-up within session_ttl_s)
+# fill slots (item, budget, use, specs, must-haves, brand, store), ask what is unknown one question per round
+# (item, budget first; ≤ max_clarify_rounds; Skip searches now), search real store listings, recommend `picks` of them with name/price/store/link
+# rendered by code. Standing preferences the owner states are kept in Redis `shop:prefs`.
+shopping:
+  enabled: true
+  stores: [pchome, momo, yahoo]     # tools/shop.py adapters; Shopee blocks automated clients
+  max_clarify_rounds: 10           # one question per round: item, budget, use, 1-2 specs, must-have, brand, store
+  max_candidates: 15                # listings shown to the model
+  min_relevance: 0.5                # share of a search term's character bigrams a listing name must contain
+  picks: [3, 5]
+  per_store: 20
+  cache_s: 3600
+  session_ttl_s: 1800               # follow-ups ("cheaper", "other brand") refine the last search
+
+# §12b read-only rendering: the `browser` service (headless Chromium) re-reads pages whose plain fetch is a
+# JS shell (< min_text_chars of HTML text) or returned a status in render_on_status. Used by fetch_source and
+# fetch_page; the rendered text replaces the plain one only if longer. No clicks/forms/logins (phase 8b).
+browser:
+  enabled: true
+  min_text_chars: 500
+  render_on_status: [403]
+  timeout_s: 20                     # page load (domcontentloaded)
+  settle_ms: 1500                   # then wait up to this long for network idle
 
 # Daily USD budget per provider (LiteLLM spend tracked by the harness).
 budgets_usd_daily:
@@ -42,7 +87,7 @@ router:
   rule_confidence: 0.6
 
 executor:
-  recursion_limit: 25
+  recursion_limit: 90            # 10 clarify rounds x3 + 3 research loops x5 + fixed nodes ~= 55
   max_history_turns: 20          # keep last N user turns in the model context
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry
@@ -57,6 +102,20 @@ queues:
 heavy_media_kinds: [video, large_doc]
 defer_recheck_s: 300
 gpu_concurrency: 2
+
+# gpu-governor (§11): publishes Redis gpu_state FREE|BUSY|GAMING.
+gpu_governor:                # phase 4 (§11): app/governor.py, compose service gpu-governor
+  enabled: true              # false = no heartbeat alert (gpu_state then only changes via host/gpu-state.sh)
+  poll_s: 2
+  gaming_container: steam-headless
+  gaming_util: 30          # GPU util % (with steam-headless running) that counts as gaming; NVENC > 0 always does
+  gaming_exit_s: 300       # stay GAMING this long after the condition clears
+  busy_util: 70            # GPU util % sustained for busy_enter_s -> BUSY (ignored while harness jobs hold the GPU)
+  busy_enter_s: 30
+  busy_free_vram_gb: 8     # free VRAM (not counting Ollama's own models) below this -> BUSY
+  busy_exit_s: 120
+  inflight_short_s: 20     # a local run older than this when GAMING starts is moved off the GPU (cloud / deferred)
+  heartbeat_ttl_s: 30      # no governor heartbeat for this long -> LINE alert
 
 alerts:
   dedupe_s: 3600

@@ -21,6 +21,7 @@ _COMMAND_RE = re.compile(r"^\s*/(stop)\s+(cloud|all)\s*$|^\s*/(resume)\s*$|^\s*/
 # "/word" at the start (not a path like /etc/x); routing overrides are handled by Gate 0.
 _SLASH_RE = re.compile(r"^\s*/([A-Za-z][\w-]*)(?=\s|$)")
 _OVERRIDES = {"local", "cloud", "code"}
+_SKIP_RE = re.compile(r"^\s*/skip\s*$", re.IGNORECASE)
 
 HELP_TEXT = """Commands
 /help - show this list
@@ -29,6 +30,9 @@ Routing (put at the start of a message):
 /local <message> - answer with the local model only
 /cloud <message> - answer with a cloud model
 /code <message> - treat as a coding task
+
+Clarifying questions:
+/skip - answer without clarifying (I state my assumption)
 
 Owner controls:
 /stop cloud - block all cloud model calls
@@ -86,7 +90,11 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     if not await state.dedupe(r, job.dedupe_key):
         return SubmitResult(duplicate=True)
 
-    if reply := await handle_command(job.text or "", source=job.channel):
+    pending = await state.get_pending(r, job.thread_id)
+    skip = bool(_SKIP_RE.match(job.text or ""))
+    if skip and not pending:
+        return SubmitResult(command_reply="Nothing to skip: no question is waiting for an answer.")
+    if not skip and (reply := await handle_command(job.text or "", source=job.channel)):
         return SubmitResult(command_reply=reply)
 
     t0 = time.monotonic()
@@ -121,9 +129,19 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         text=router_text, redacted_text=router_redacted, private=private,
         gpu_state=gpu, killswitch=ks, policy=pol,
     )
-    decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks, clarify_rounds=clarify_rounds)
+    decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks, clarify_rounds=clarify_rounds,
+                      resuming=bool(pending))
     decision.reasons = g0.reasons + decision.reasons
-    if decision.route == "clarify":
+    if pending:
+        # Answer to the grounded graph's question: keep the exchange for the next round's routing;
+        # the worker clears it when the turn is done.
+        await state.clear_pending(r, job.thread_id)
+        if clarify_ctx:
+            await state.set_clarify_ctx(r, job.thread_id, text=router_text, redacted_text=router_redacted,
+                                        rounds=clarify_rounds, ttl_s=int(clarify_cfg.get("context_ttl_s", 86400)))
+        decision.reasons.append(f"resume: answer to the question of run {pending['run_id']}"
+                                + (" (skipped)" if skip else ""))
+    elif decision.route == "clarify":
         # A first clarify keeps just this message (not the previous-message prefix); later rounds keep the exchange.
         await state.set_clarify_ctx(r, job.thread_id,
                                     text=router_text if clarify_ctx else g0.text,
@@ -132,8 +150,9 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
                                     ttl_s=int(clarify_cfg.get("context_ttl_s", 86400)))
     elif clarify_ctx:
         await state.clear_clarify_ctx(r, job.thread_id)
-    await state.set_prev_msg(r, job.thread_id, text=g0.text, redacted_text=g0.redacted_text,
-                             ttl_s=int(clarify_cfg.get("previous_ttl_s", 3600)))
+    if not pending:
+        await state.set_prev_msg(r, job.thread_id, text=g0.text, redacted_text=g0.redacted_text,
+                                 ttl_s=int(clarify_cfg.get("previous_ttl_s", 3600)))
     latency = int((time.monotonic() - t0) * 1000)
 
     run_id = uuid.uuid4().hex
@@ -145,6 +164,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
             "gate0": g0.model_dump(mode="json", exclude={"text"}),
             "gpu_state": gpu, "budget": budget.model_dump(), "killswitch": ks,
             "clarify_rounds": clarify_rounds,
+            **({"resume_of": pending["run_id"]} if pending else {}),
             **({"router_text": router_redacted} if router_redacted != g0.redacted_text else {}),
         },
         router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),
@@ -165,6 +185,9 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         "intent": router.intent,
         "delivery": delivery or {},
     }
+    if pending:
+        payload["resume"] = {"value": None if skip else model_text, "parent_run_id": pending["run_id"]}
+        await state.set_run_meta(r, pending["run_id"], status="answered", answered_by=run_id)
     queue_cfg = pol.get("queues", {}).get(decision.queue, {})
     queue_name = queue_cfg.get("name", f"arq:{decision.queue}")
     await state.set_run_meta(r, run_id, thread_id=job.thread_id, queue=queue_name, status="queued",
