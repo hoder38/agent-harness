@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .. import config, db, pipeline, state
 from ..auth import require_owner
+from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import build_grounded_graph
 from ..graphs.main import build_graph
 from ..models import Job, KillSwitch, Override
@@ -181,13 +182,15 @@ async def get_thread(tid: str, request: Request, owner: str = Depends(require_ow
     thread_id = _thread_id(tid)
     r = state.get_redis()
     pol = config.policy()
-    if (pol.get("grounding") or {}).get("enabled"):
+    pending = await state.get_pending(r, thread_id)
+    if pending and pending.get("kind") == "coding":   # the coding graph's interrupt is only visible to it
+        graph = build_coding_graph(None, checkpointer=request.app.state.checkpointer)
+    elif (pol.get("grounding") or {}).get("enabled"):
         graph = build_grounded_graph(None, policy=pol, checkpointer=request.app.state.checkpointer)
     else:
         graph = build_graph(None, [], checkpointer=request.app.state.checkpointer)
     snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
     msgs = [s for m in (snap.values or {}).get("messages", []) if (s := _serialize(m))]
-    pending = await state.get_pending(r, thread_id)
     question = None
     if pending and snap.interrupts:
         v = snap.interrupts[0].value or {}

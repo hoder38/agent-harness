@@ -168,9 +168,11 @@ async def clarify_ctx_from_question(r: aioredis.Redis, thread_id: str, question:
 
 # ---------------------------------------------------------------- pending clarify (grounded graph interrupt)
 # While set, the thread's next message is the answer to the graph's question and resumes that run.
-async def set_pending(r: aioredis.Redis, thread_id: str, *, run_id: str, round_: int, ttl_s: int) -> None:
-    await r.set(f"pending:{thread_id}", json.dumps({"run_id": run_id, "round": round_, "created_at": time.time()}),
-                ex=ttl_s)
+async def set_pending(r: aioredis.Redis, thread_id: str, *, run_id: str, round_: int, ttl_s: int,
+                      kind: str = "grounded") -> None:
+    """A question waits for the owner's answer; `kind` = the graph that asked (grounded | coding)."""
+    await r.set(f"pending:{thread_id}", json.dumps({"run_id": run_id, "round": round_, "created_at": time.time(),
+                                                    "kind": kind}), ex=ttl_s)
 
 
 async def get_pending(r: aioredis.Redis, thread_id: str) -> dict[str, Any] | None:

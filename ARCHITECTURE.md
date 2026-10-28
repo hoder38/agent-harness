@@ -312,6 +312,62 @@ Every decision is written to `decisions` table (job_id, inputs, jev raw output, 
 - After Copilot finishes: harness runs tests/lint itself (verify layer), shows diff, `interrupt()` before commit/push/PR.
 - Sandbox Copilot sessions use a per-sandbox `COPILOT_HOME`; continuation across sessions uses stored summaries, not `--resume` across homes.
 
+### Implemented 2026-10-28 (phase 5) — headless, one approval at the end
+**Flow** (`api/app/graphs/coding.py`, route `coding` = `/code …`; no LLM of our own — the request goes to Copilot verbatim):
+1. `start`: refuse on PRIVATE threads and when the kill switch is `cloud|all` (Copilot is a cloud service). Pick the repo
+   from `config/coding.yaml` (`repos.<name>.aliases`, whole words); if none or several match, ask with a clarify
+   interrupt whose options are the repo names.
+2. `run_copilot`: sandbox-manager clones the repo and runs `copilot -p` in a throwaway container; progress lines stream
+   as `token` events.
+3. `run_tests`: the harness runs the repo's own test command in a **second** container (no token, `network: none`).
+   On failure Copilot gets **one** retry (`coding.max_retries`) with the test output tail.
+4. `review` → `approve`: a clarify interrupt (`kind: approval`) with Copilot's summary, test result, diffstat and the
+   first `diff_chars` of the diff; options Approve / Reject (核准 / 拒絕). Any other reply = a revision request
+   (Copilot re-runs with it, up to `max_revisions` 2). Works on web and LINE unchanged; the question stays answerable
+   for `approval_ttl_s` (3 days). `/skip` = reject.
+5. `apply`: squash everything into one commit and `git fetch <clone> HEAD:refs/heads/agent/<slug>-<id>` into the
+   original repo. The working tree and current branch of the original repo are not touched; **nothing is pushed**
+   (no push token exists anywhere). The task dir is then deleted.
+
+**Deviations from the plan above**
+- **Clone instead of worktree**: `git clone --local --no-hardlinks` into `SANDBOX_ROOT/<task>/repo` (a worktree would
+  write into the original repo's `.git` while Copilot works). Uncommitted changes in the original are not included.
+- **Headless instead of ACP**: no per-tool approval cards; permissions are fixed allow/deny lists in
+  `config/coding.yaml` (`write`, `shell(git:*)`, read-only shell tools, `python3`, `node`; denied: `git push`,
+  `git remote`, `git config`, `rm`, `curl`, `wget`). Deny beats allow. The container is the real boundary.
+- **Sandbox root** is `/home/hoder/agent-sandboxes` (`SANDBOX_ROOT` in `.env`; no root on the host for `/srv/agent`).
+- Flags used: `copilot -p … -s --output-format json --no-ask-user --no-auto-update --disable-builtin-mcps
+  --secret-env-vars=COPILOT_GITHUB_TOKEN --max-ai-credits 2000 --allow-tool … --deny-tool …`. The final answer is the
+  last `assistant.message` event; usage comes from `session.usage_checkpoint` (`totalPremiumRequests`,
+  `totalNanoAiu`/1e9 recorded as `ai_credits`) and is stored in the run outcome (`done.coding.usage`).
+
+**sandbox-manager** (`sandbox-manager/app.py`, FastAPI on `agent` + `dockerctl`, bearer = `HARNESS_TOKEN`):
+`POST /tasks` (clone) · `POST /tasks/{id}/jobs {kind: copilot|test}` · `GET /tasks/{id}/jobs/{job}` ·
+`DELETE …/jobs/{job}` · `GET /tasks/{id}/diff` · `POST /tasks/{id}/apply {branch, message}` · `DELETE /tasks/{id}`.
+- It mounts only `<repo>/.git` of each configured repo (no working tree, no `.env`), plus `SANDBOX_ROOT` at the same
+  path (so sandbox bind mounts resolve on the host). Read-only rootfs, `cap_drop: ALL`.
+- Sandbox containers: uid 1000, `cap_drop: ALL`, `no-new-privileges`, 4 CPU / 6 GB / 1024 pids, `/tmp` tmpfs, at most
+  `max_running` 2 at once. Copilot containers join only the internal `agent-sandbox` network (squid :4750 is the
+  only reachable host); test containers default to `network: none`. Mounts: the clone at `/workspace` and the task's
+  own home (`COPILOT_HOME`, `trustedFolders: [/workspace]`).
+- A reaper kills containers older than their timeout (+2 min) and deletes task dirs older than `task_ttl_h` (72 h).
+- Cancel: the graph polls `state.is_cancelled` while a job runs and kills the container (also on task abort).
+
+**Test commands** (`repos.<name>.test`): agent-harness runs pytest in `agent-harness-api:test` with the clone's
+`api/` and `config/` mounted; nodeReact runs jest in its own `reactnode-server:v1.0` image (node 14 + `node_modules`
+symlinked from `/app`), skipping the integration suites and `shioaji-tool` (they need Mongo/Redis).
+Measured on the unmodified repos: agent-harness 158 passed; nodeReact 3840 + 1326 passed (~4 min).
+
+**Verified live 2026-10-28**: `/code` → repo question → answer resumes the coding graph; a missing token ends the run
+with a clear error. From `agent-sandbox`, only `egress-proxy:4750` is reachable (direct internet: ENETUNREACH; Redis,
+Postgres, sandbox-manager and socket-proxy-rw do not resolve); squid allows `api.github.com` and denies `example.com`.
+**End-to-end run (2026-10-28)**: `/code` README edit on agent-harness → Copilot edit → harness tests passed → approval
+question with diff (21 s) → "1" → commit on a local `agent/…` branch, sandbox cleaned up; 1 premium request
+(6.8 AI credits). **Phase-5 gate passed:** all Copilot traffic went through squid (`api.github.com`,
+`api.business.githubcopilot.com`, `telemetry.business.githubcopilot.com`; `cafe.github.com` is denied and not needed).
+The PAT must be user-owned with the account permission "Copilot Requests"; otherwise Copilot fails with
+"Authentication failed" even though `/user` works.
+
 ### 9b. SSH Copilot → harness memory (ingest)
 Host-level Copilot hooks (`~/.copilot/hooks/harness.json`):
 ```json
@@ -882,7 +938,7 @@ services:
     image: ghcr.io/stripe/smokescreen                     # VERIFY image; alt: squid with ACL allowlist
     volumes: ["./config/egress-allowlist.yaml:/etc/smokescreen/acl.yaml:ro"]
     networks: [agent, egress]
-  sandbox-manager:
+  sandbox-manager:                       # implemented phase 5: see docker-compose.yml + §9a (networks agent, dockerctl)
     build: ./sandbox-manager
     environment: [DOCKER_HOST=tcp://socket-proxy-rw:2375]
     networks: [agent]
@@ -931,12 +987,13 @@ agent-harness/
           gates/{gate0,gate1_qwen,jev_router}.py  decision.py
           jobs/  memory/  rag/  tools/  mcp_server/  llm/
           tools/shop.py      # §12c store adapters (PChome, momo, Yahoo)
+          tools/sandbox.py   # §9a sandbox-manager client; graphs/coding.py = coding route
     tests/
     langgraph.json
   media/               # media-worker
   governor/            # gpu-governor
   browser/             # §12b read-only renderer (Playwright/Chromium)
-  sandbox-manager/     # + sandbox image Dockerfile
+  sandbox-manager/     # app.py (FastAPI) + sandbox/Dockerfile (Copilot CLI image); repos in config/coding.yaml
   host/                # copilot hooks + install script
 ```
 
@@ -951,7 +1008,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 2 | Gate 0 + Jev router + decision layer (+ Qwen fallback router; Gate 1 stub only); `decisions` logging + replay tool | Unit tests for `decide()` cover every rule; Jev outage → fallback works |
 | 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
 | 4 | gpu-governor + Ollama unload — **implemented 2026-10-28** (§11; live GAMING test with `steam-headless` pending) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
-| 5 | Coding route: sandbox-manager + Copilot ACP + verify + approval | Task produces diff, harness-run tests pass, push blocked until approved |
+| 5 | Coding route: sandbox-manager + Copilot (headless, not ACP) + verify + approval — **implemented 2026-10-28** (§9a; verified end-to-end, squid gate passed) | Task produces diff, harness-run tests pass, push blocked until approved (nothing is ever pushed; approval creates a local branch) |
 | 6 | Copilot ingest hooks + harness-memory MCP | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
 | 7 | Todos + Inbox + background approvals | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
 | 8 | LINE channel + **health alerts** | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
@@ -968,6 +1025,12 @@ re-prioritise remaining phases from real usage and the decision log.
 
 - No agent container mounts `csr/`, `.env*`, home dir, or the raw Docker socket.
 - Only `sandbox-manager` can create containers (via `socket-proxy-rw`).
+  - **Risk:** `socket-proxy-rw` allows `POST` on containers, which is effectively root on the host (anyone who can
+    reach it can start a privileged container). It therefore sits alone on the internal `dockerctl` network with
+    sandbox-manager; sandbox-manager accepts only the `HARNESS_TOKEN` bearer and builds every container spec itself
+    (fixed image, uid 1000, `cap_drop: ALL`, no privileged mode, mounts only inside its task dir).
+  - Coding sandboxes see only their clone; `COPILOT_GITHUB_TOKEN` (Copilot Requests only) goes to Copilot containers
+    and never to test containers. No push credentials exist; approval only creates a local branch.
 - Secrets in `.env` (gitignored) or Docker secrets; injected into tool code; never placed in prompts.
 - All content from mail, web, documents, vault/Notion, LINE, and media is **untrusted data** (prompt-injection defence):
   - Every tool result and retrieved chunk carries `trust: owner|untrusted`; only direct owner messages are `owner`.
@@ -987,9 +1050,11 @@ re-prioritise remaining phases from real usage and the decision log.
 - `typesafe-sdk` async client and response field names; Jev data retention terms.
 - Qwen3.5 9B Ollama tag and whether it supports vision.
 - LINE reply-token expiry and content retention window.
-- Copilot CLI `--allow-tool` / `--deny-tool` pattern syntax; ACP permission message format; terms for non-coding use.
+- Copilot CLI `--allow-tool` / `--deny-tool` pattern syntax (resolved 2026-10-28: `copilot help permissions` —
+  `shell(cmd)`, `shell(git:*)` prefix form, `write(path?)`, `url(…)`; deny beats allow); ACP permission message format; terms for non-coding use.
 - LiteLLM, Phoenix, Smokescreen image tags and config keys.
-- Copilot CLI: honours `HTTPS_PROXY`; least-privilege token type; usage/credit field names in events and OTel.
+- Copilot CLI: honours `HTTPS_PROXY` (resolved 2026-10-28: all Copilot traffic seen in the squid log);
+  least-privilege token type; usage/credit field names (resolved: `session.usage_checkpoint`).
 - Name of the nodeReact nginx Docker network.
 - Obsidian Importer: Notion API support and database → Bases mapping; linuxserver/obsidian image.
 - §12a: Brave `freshness` parameter and per-query price; whether the LINE reply token outlives a clarify round (else use push); local KB (§10a) timeline for PRIVATE verification.

@@ -1,0 +1,71 @@
+# §9a coding route (phase 5). Read by sandbox-manager (containers) and the coding graph (repo choice, retries).
+sandbox:
+  image: agent-harness-sandbox:latest      # built from sandbox-manager/sandbox/Dockerfile
+  network: agent-sandbox                   # internal; only egress-proxy is reachable
+  proxy: http://egress-proxy:4750          # strict allowlist port
+  cpus: 4
+  mem: 6g
+  pids: 1024
+  max_running: 2                           # sandbox containers at once
+  copilot_timeout_s: 1200
+  test_timeout_s: 900
+  task_ttl_h: 72                           # unapplied clones are deleted after this
+  max_ai_credits: 2000                     # copilot --max-ai-credits, per Copilot run
+  model: ""                                # empty = Copilot's default model
+  # Headless permissions (copilot help permissions). Deny beats allow. Never --allow-all.
+  allow_tools:
+    - write
+    - shell(git:*)
+    - shell(ls)
+    - shell(cat)
+    - shell(head)
+    - shell(tail)
+    - shell(wc)
+    - shell(grep)
+    - shell(rg)
+    - shell(find)
+    - shell(sed)
+    - shell(diff)
+    - shell(python3)
+    - shell(node)
+  deny_tools:
+    - shell(git push)
+    - shell(git remote)
+    - shell(git config)
+    - shell(rm)
+    - shell(curl)
+    - shell(wget)
+
+coding:
+  max_retries: 1                           # Copilot re-runs with the test failure output
+  poll_s: 3
+  diff_chars: 6000                         # diff shown in the approval question
+  approval_ttl_s: 259200                   # 3 days: the approval question stays answerable
+
+# The original repo is only touched on approval (`git fetch <clone> HEAD:agent/<task>`); paths must also be
+# mounted at the same path into sandbox-manager (docker-compose.yml).
+repos:
+  agent-harness:
+    path: /home/hoder/agent-harness
+    description: "self-hosted agent harness (FastAPI, LangGraph, arq, docker compose)"
+    aliases: [agent-harness, harness, agent harness, 代理, 助理後端, langgraph, fastapi]
+    test:                                  # the harness's own test image; no network, no token
+      image: agent-harness-api:test
+      mounts: { api: /app, config: /config }
+      workdir: /app
+      network: none
+      env: { POLICY_PATH: /config/policy.yaml, PRIVACY_RULES_PATH: /config/privacy_rules.yaml, TZ: Asia/Taipei }
+      command: [python, -m, pytest, -q, -p, no:cacheprovider, -x]
+  nodeReact:
+    path: /home/hoder/nodeReact
+    description: "nodeReact web app (Node 14 backend + React front end, includes the /Agent page)"
+    aliases: [nodereact, node react, react, frontend, front end, 前端, 網站, agent page, /agent]
+    # nodeReact's own image has node 14 + node_modules at /app. Integration suites and shioaji-tool need
+    # Mongo/Redis, so they are skipped (the sandbox test has no network).
+    test:
+      image: reactnode-server:v1.0
+      mounts: { ".": /work }
+      workdir: /work
+      network: none
+      env: { CI: "true" }
+      command: [sh, -c, "ln -sfn /app/node_modules node_modules && trap 'rm -f node_modules' EXIT && NODE_OPTIONS=--experimental-vm-modules npx jest --forceExit --ci --cacheDirectory /tmp/jest --testPathIgnorePatterns '(integration|shioaji-tool)' && npx jest --config jest.front.cjs --forceExit --ci --cacheDirectory /tmp/jest"]

@@ -1,15 +1,16 @@
 name: agent-harness
 
 # MVP = phases 1, 2, 3 + 8; + phase 4 gpu-governor, 8a grounded answering, 8b-read browser (ARCHITECTURE.md §15).
-# Later phases add media-worker, sandbox-manager, socket-proxy-rw and syncthing.
+# + phase 5 coding route: sandbox-manager, socket-proxy-rw, sandbox image (§9a).
+# Later phases add media-worker and syncthing.
 
 x-proxy-env: &proxy-env
   HTTP_PROXY: http://egress-proxy:4750
   HTTPS_PROXY: http://egress-proxy:4750
   http_proxy: http://egress-proxy:4750
   https_proxy: http://egress-proxy:4750
-  NO_PROXY: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
-  no_proxy: litellm,ollama,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
+  NO_PROXY: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
+  no_proxy: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
 
 x-app-env: &app-env
   <<: *proxy-env
@@ -30,6 +31,8 @@ x-app-env: &app-env
   PRIVACY_RULES_PATH: /config/privacy_rules.yaml
   PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
   OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:6006
+  SANDBOX_MANAGER_URL: http://sandbox-manager:8200
+  CODING_CONFIG_PATH: /config/coding.yaml
   TZ: Asia/Taipei
 
 x-app: &app
@@ -206,7 +209,7 @@ services:
       - ./config/squid.conf:/etc/squid/squid.conf:ro
       - ./config/egress-allowlist.txt:/etc/squid/allowlist.txt:ro
     restart: unless-stopped
-    networks: [agent, egress]
+    networks: [agent, egress, sandbox]
 
   browser:                                   # §12b read-only renderer: headless Chromium, no host ports,
     build: ./browser                         # internal network only; all page traffic via squid :4751
@@ -235,11 +238,55 @@ services:
     restart: unless-stopped
     networks: [agent]
 
+  sandbox-manager:                           # phase 5 (§9a): the only service that can create containers
+    build: ./sandbox-manager
+    image: agent-harness-sandbox-manager:latest
+    environment:
+      DOCKER_HOST: tcp://socket-proxy-rw:2375
+      SANDBOX_ROOT: ${SANDBOX_ROOT:?}
+      SANDBOX_MANAGER_TOKEN: ${HARNESS_TOKEN:?}
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:-}   # only ever passed to `copilot` sandboxes
+      CODING_CONFIG_PATH: /config/coding.yaml
+      TZ: Asia/Taipei
+    volumes:
+      - ./config:/config:ro                          # dir, not file: edits stay visible
+      - ${SANDBOX_ROOT:?}:${SANDBOX_ROOT:?}             # same path inside and on the host (bind mounts for sandboxes)
+      # Only the .git of each repo in config/coding.yaml (clone source + branch target), at its host path.
+      - /home/hoder/agent-harness/.git:/home/hoder/agent-harness/.git
+      - /home/hoder/nodeReact/.git:/home/hoder/nodeReact/.git
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [agent, dockerctl]
+    depends_on: [socket-proxy-rw]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  sandbox-image:                             # build-only: docker compose --profile build build sandbox-image
+    profiles: [build]
+    build: ./sandbox-manager/sandbox
+    image: agent-harness-sandbox:latest
+
+  socket-proxy-rw:                           # create/start/remove containers; reachable only from sandbox-manager
+    image: tecnativa/docker-socket-proxy:latest
+    environment: { CONTAINERS: "1", IMAGES: "1", POST: "1", EVENTS: "0" }
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    restart: unless-stopped
+    networks: [dockerctl]
+
 volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {} }
 
 networks:
   agent: { internal: true }
   egress: {}
+  sandbox: { internal: true, name: agent-sandbox }   # coding sandboxes + egress-proxy only
+  dockerctl: { internal: true }              # sandbox-manager ↔ socket-proxy-rw only
   hostonly:                                  # publish host ports without giving outbound internet
     driver: bridge
     driver_opts: { com.docker.network.bridge.enable_ip_masquerade: "false" }

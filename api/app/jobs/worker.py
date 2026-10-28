@@ -14,12 +14,14 @@ from langgraph.types import Command
 
 from .. import config, db, state
 from ..channels import line
+from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import SKIP, build_grounded_graph
 from ..graphs.main import build_graph, system_prompt
 from ..llm.client import CloudBlocked, make_llm
 from ..models import LOCAL_MODELS, Decision, Job
 from ..telemetry import setup_tracing
 from ..tools import tools_for
+from ..tools.sandbox import SandboxClient, coding_config
 from .alerts import check_budget, send_alert
 
 log = logging.getLogger(__name__)
@@ -160,7 +162,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     await state.set_run_meta(r, run_id, status="running", model=model)
     ex = pol.get("executor", {})
     gov = pol.get("gpu_governor") or {}
-    grounded = _use_grounded(pol)
+    coding = route == "coding"
+    grounded = _use_grounded(pol) and not coding
     usage = {"input": 0, "output": 0}
     streamed = False
     cancelled = False
@@ -170,7 +173,17 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     try:
         llm = make_llm(model, ks)
         max_turns = int(ex.get("max_history_turns", 20))
-        if grounded:
+        if coding:
+            async def notify(text: str) -> None:
+                await state.emit(r, run_id, "token", text)
+
+            async def is_cancelled() -> bool:
+                return await state.is_cancelled(r, run_id)
+
+            graph = build_coding_graph(SandboxClient(), config=coding_config(), notify=notify,
+                                       cancelled=is_cancelled, checkpointer=ctx["checkpointer"])
+            answer_nodes: set[str] = set()
+        elif grounded:
             graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns)
             answer_nodes = {"compose"}
         else:
@@ -190,9 +203,11 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             "metadata": {"run_id": run_id, "route": route, "model": model, "channel": job.channel},
             "tags": [route, model, job.channel],
         }
-        inp = await _graph_input(graph, cfg, payload, job, decision, model, grounded)
+        inp = await _graph_input(graph, cfg, payload, job, decision, model, grounded or coding)
+        if coding and isinstance(inp, dict):
+            inp["killswitch"] = ks
         sem = (state.GpuSemaphore(r, int(pol.get("gpu_concurrency", 2)))
-               if model == "local" else contextlib.nullcontext())
+               if model == "local" and not coding else contextlib.nullcontext())
         short_s = float(gov.get("inflight_short_s", 20))
         last_check = 0.0
         stream_id = None
@@ -204,7 +219,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                     if await state.is_cancelled(r, run_id):
                         cancelled = True
                         break
-                    if (model == "local" and now - started > short_s
+                    if (model == "local" and not coding and now - started > short_s
                             and await state.get_gpu_state(r) == "GAMING"):
                         gaming_stop = True  # long local run: hand the GPU back (§11)
                         break
@@ -271,10 +286,13 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                                                   "cost_usd": cost, "ms": elapsed})
         await state.set_run_meta(r, run_id, status="awaiting_input")
         g_cfg = pol.get("grounding") or {}
-        await state.set_pending(r, job.thread_id, run_id=run_id, round_=int(q.get("round") or 1),
-                                ttl_s=int(g_cfg.get("pending_ttl_s", 86400)))
-        await state.clarify_ctx_from_question(r, job.thread_id, str(q.get("question") or "")[:1000],
-                                              int((pol.get("clarify") or {}).get("context_ttl_s", 86400)))
+        ttl = (int((coding_config().get("coding") or {}).get("approval_ttl_s", 259200)) if coding
+               else int(g_cfg.get("pending_ttl_s", 86400)))
+        await state.set_pending(r, job.thread_id, run_id=run_id, round_=int(q.get("round") or 1), ttl_s=ttl,
+                                kind="coding" if coding else "grounded")
+        if not coding:
+            await state.clarify_ctx_from_question(r, job.thread_id, str(q.get("question") or "")[:1000],
+                                                  int((pol.get("clarify") or {}).get("context_ttl_s", 86400)))
         await db.update_outcome(run_id, {"status": "awaiting_input", "usage": usage, "ms": elapsed, "model": model,
                                          "clarify_round": q.get("round")}, cost)
         if job.channel == "line":
@@ -295,10 +313,16 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                    "unverified": len(ans.get("unverified") or []), "budget": b}
         done["grounding"] = summary
         outcome["grounding"] = summary
+    if coding and vals.get("coding"):
+        c = vals["coding"]
+        summary = {k: c.get(k) for k in ("repo", "task_id", "status", "branch", "usage", "attempt", "revisions")}
+        summary["tests_passed"] = (c.get("tests") or {}).get("passed")
+        done["coding"] = summary
+        outcome["coding"] = summary
     await state.emit(r, run_id, "done", done)
     await state.set_run_meta(r, run_id, status="done")
     await db.update_outcome(run_id, outcome, cost)
-    if grounded:
+    if grounded or coding:
         await state.clear_clarify_ctx(r, job.thread_id)
     elif decision.route == "clarify" and final:
         await state.set_clarify_question(r, job.thread_id, final[:1000])

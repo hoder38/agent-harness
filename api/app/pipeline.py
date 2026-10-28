@@ -141,6 +141,11 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
                                         rounds=clarify_rounds, ttl_s=int(clarify_cfg.get("context_ttl_s", 86400)))
         decision.reasons.append(f"resume: answer to the question of run {pending['run_id']}"
                                 + (" (skipped)" if skip else ""))
+        if pending.get("kind") == "coding":
+            # Repo choice / approval for the coding graph: the answer goes back to it, whatever the router said.
+            decision.route = "coding"
+            decision.queue = "background" if decision.queue == "background" or job.channel == "line" else "coding"
+            decision.reasons.append("resume: coding graph question → coding")
     elif decision.route == "clarify":
         # A first clarify keeps just this message (not the previous-message prefix); later rounds keep the exchange.
         await state.set_clarify_ctx(r, job.thread_id,

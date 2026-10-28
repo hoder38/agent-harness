@@ -54,7 +54,7 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `d
 - `done.grounding` = `{verdict, citations, unverified, budget}`.
 
 **Message prefixes**
-- Routing overrides: `/local`, `/cloud`, `/code` (strong model). Private content is detected automatically (PII/secrets/keywords) and stays local.
+- Routing overrides: `/local`, `/cloud`, `/code` (coding sandbox, see Coding below). Private content is detected automatically (PII/secrets/keywords) and stays local.
 - Owner commands: `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other `/word` replies with the command list.
 - `/skip` (web or LINE) skips an open clarifying question; the answer then states its assumptions.
 
@@ -75,6 +75,15 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `d
 - Ambiguous messages pause the run with a question (an `interrupt` event on the web; numbered options on LINE). Your next message, or `POST /runs/{id}/resume`, continues the same run. Unanswered questions expire after `grounding.pending_ttl_s`.
 - Per-turn caps: 3 searches, 4 page reads, 90 s of active time, $0.05. Hitting a cap ends the answer with a "Verification limit reached" line.
 - On local Qwen, every grounded LLM call runs with thinking off (`think: false`). With thinking on, Qwen spends the whole `max_tokens` on hidden reasoning. `grounding.local_think_tasks` can re-enable it per step, but this measured about 140 s per turn, so it is off.
+
+**Coding** (§9a, phase 5): `/code <task>` (name the repo, e.g. "harness" or "前端", or pick it from the question)
+- Copilot CLI works in a throwaway clone inside a sandbox container; the harness then runs the repo's tests itself
+  (one automatic retry on failure) and asks for approval with the diff. Approve → one commit on a new **local** branch
+  `agent/<slug>-<id>` in the original repo; Reject → discarded; any other reply → Copilot revises. Nothing is pushed.
+- Needs `COPILOT_GITHUB_TOKEN` (fine-grained PAT with only "Copilot Requests") in `.env`, then
+  `docker compose up -d sandbox-manager`. Repos, test commands and Copilot tool permissions: `config/coding.yaml`.
+- Build the sandbox image once (and after Copilot upgrades): `docker compose --profile build build sandbox-image`.
+- Clones live in `SANDBOX_ROOT` (`/home/hoder/agent-sandboxes`) and are deleted after apply/reject or 72 h.
 
 **Host controls**
 - `host/killswitch.sh off|cloud|all`

@@ -16,7 +16,6 @@ ROUTE_HINTS = {
     "clarify": ("The request is ambiguous. Do not answer it yet. Ask ONE short clarifying question about the "
                 "single most important missing detail (which thing, time, place, version, or goal); you may "
                 "offer up to 3 short options. Nothing else."),
-    "coding": "The coding sandbox is not available yet; give the best answer you can directly.",
     "assistant": "Help with personal organisation. Todo/calendar tools are not connected yet; say so if needed.",
 }
 
