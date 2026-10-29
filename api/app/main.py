@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from . import db, state
-from .routes import internal, line, web
+from .routes import internal, line, memory, web
 from .settings import get_settings
 from .telemetry import setup_tracing
 
@@ -38,6 +38,7 @@ app = FastAPI(title="agent-harness", lifespan=lifespan)
 app.include_router(web.router)
 app.include_router(line.router)
 app.include_router(internal.router)
+app.include_router(memory.router)
 
 
 @app.get("/healthz")

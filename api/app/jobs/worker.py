@@ -22,6 +22,7 @@ from ..models import LOCAL_MODELS, Decision, Job
 from ..telemetry import setup_tracing
 from ..tools import tools_for
 from ..tools.sandbox import SandboxClient, coding_config
+from . import memory_jobs
 from .alerts import check_budget, send_alert
 
 log = logging.getLogger(__name__)
@@ -338,6 +339,13 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         await state.set_clarify_question(r, job.thread_id, final[:1000])
     if job.channel == "line":
         await _deliver_line(job, decision, delivery, final, pol)
+    if not coding and ctx.get("redis") is not None:
+        try:
+            await memory_jobs.after_turn(ctx["redis"], run_id=run_id, thread_id=job.thread_id,
+                                         user_text=payload.get("text") or "", answer=final,
+                                         private=decision.private, channel=job.channel)
+        except Exception:
+            log.exception("memory after_turn failed")
     return {"status": "done"}
 
 

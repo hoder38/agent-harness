@@ -19,15 +19,27 @@ def get_current_time(timezone: str = "Asia/Taipei") -> str:
 
 ROUTE_TOOLS = {
     "chat": [get_current_time],
-    "assistant": [get_current_time],   # todos / memory / RAG tools arrive in phases 7 and 10
+    "assistant": [get_current_time],   # + knowledge/memory tools (phase 10) below; todos arrive in phase 7
     "clarify": [],
     "coding": [],
 }
 WEB_ROUTES = {"chat", "assistant"}
+KB_ROUTES = {"chat", "assistant"}
 
 
 def tools_for(route: str, *, private: bool = False) -> list:
     tools = list(ROUTE_TOOLS.get(route, []))
+    if route in KB_ROUTES:  # local services only: PRIVATE threads get them too
+        from .. import config
+        from .knowledge import kb_tools
+
+        pol = config.policy()
+        kt = kb_tools(private=private)
+        if not (pol.get("rag") or {}).get("enabled"):
+            kt = [t for t in kt if t.name != "search_knowledge"]
+        if not (pol.get("memory") or {}).get("enabled"):
+            kt = [t for t in kt if t.name == "search_knowledge"]
+        tools += kt
     # Web tools send text off the machine, so PRIVATE threads never get them.
     if route in WEB_ROUTES and not private:
         from .web import fetch_page, web_search

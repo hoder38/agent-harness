@@ -1,0 +1,72 @@
+# Retrieval eval set (§10): python -m app.tools.rag_eval [--both] [-v]
+# Corpus: the docs folder (DOCS_DIR, default ~/agent-docs). These cases cover agent-harness/ARCHITECTURE.md and
+# agent-harness/README.md, copied there as the starter corpus. Add cases for your own notes as the folder grows.
+# expect: "path" (any chunk of the document) or "path#Heading" (the chunk's heading path must contain Heading).
+# A case is a hit when any expected target is in the top k.
+cases:
+  - q: How much VRAM does the GPU have and what is the CPU/RAM of the machine?
+    expect: agent-harness/ARCHITECTURE.md#Machine & environment constraints
+  - q: 哪些路徑絕對不能掛進 agent 容器？
+    expect: [agent-harness/ARCHITECTURE.md#Machine & environment constraints, agent-harness/ARCHITECTURE.md#Security checklist]
+  - q: How does nodeReact authenticate to the agent API? What JWT claims are used?
+    expect: agent-harness/ARCHITECTURE.md#nodeReact → agent-api authentication
+  - q: 語音和影片在 GPU 遊戲中時要怎麼處理？
+    expect: agent-harness/ARCHITECTURE.md#Input normalization
+  - q: Which owner commands are handled before Gate 0?
+    expect: [agent-harness/ARCHITECTURE.md#Gate 0, agent-harness/README.md#Usage]
+  - q: Gate 1 隱私檢查現在有啟用嗎？
+    expect: agent-harness/ARCHITECTURE.md#Gate 1
+  - q: How does the Jev router decide the route and model?
+    expect: [agent-harness/ARCHITECTURE.md#Gate 2, agent-harness/ARCHITECTURE.md#Decision layer]
+  - q: What queues does the job layer have and how is cancel implemented?
+    expect: agent-harness/ARCHITECTURE.md#L7 Job layer
+  - q: 寫程式的任務是怎麼交給 Copilot CLI 的？需要批准嗎？
+    expect: [agent-harness/ARCHITECTURE.md#Harness → Copilot, agent-harness/ARCHITECTURE.md#phase 5]
+  - q: How do SSH Copilot sessions get ingested into harness memory? Which hooks?
+    expect: agent-harness/ARCHITECTURE.md#SSH Copilot → harness memory
+  - q: MCP server tools for recalling harness memory from Copilot
+    expect: agent-harness/ARCHITECTURE.md#Harness memory → SSH Copilot
+  - q: Which embedding model and chunk size does RAG use?
+    expect: agent-harness/ARCHITECTURE.md#Memory, RAG, todos
+  - q: Obsidian vault 筆記怎麼進知識庫？私密筆記怎麼標？
+    expect: agent-harness/ARCHITECTURE.md#Knowledge bank
+  - q: When does the GPU governor switch to GAMING and what happens to Ollama models?
+    expect: agent-harness/ARCHITECTURE.md#GPU governor
+  - q: 遊戲時正在跑的長任務會怎樣？
+    expect: agent-harness/ARCHITECTURE.md#GPU governor
+  - q: What does the verify layer check and which actions need approval?
+    expect: agent-harness/ARCHITECTURE.md#Verify layer
+  - q: How are claims verified with authority tiers in grounded answering?
+    expect: [agent-harness/ARCHITECTURE.md#Authority tiers, agent-harness/ARCHITECTURE.md#Direct support]
+  - q: 每輪回答的成本上限是多少？搜尋和抓網頁限制幾次？
+    expect: [agent-harness/ARCHITECTURE.md#Cost limits, agent-harness/ARCHITECTURE.md#cite_only]
+  - q: What is cite_only mode and why is it the default?
+    expect: agent-harness/ARCHITECTURE.md#cite_only
+  - q: How are grounded graph tests written? Which fakes are used?
+    expect: agent-harness/ARCHITECTURE.md#Tests
+  - q: 無頭瀏覽器怎麼隔離？能連到內網嗎？
+    expect: agent-harness/ARCHITECTURE.md#read-only rendering
+  - q: Will the agent be able to log in to websites? What is planned for browser login?
+    expect: agent-harness/ARCHITECTURE.md#interactive browsing and login
+  - q: 購物推薦怎麼問預算？商品從哪些商店抓？
+    expect: agent-harness/ARCHITECTURE.md#Shopping
+  - q: Why is socket-proxy-rw a security risk and how is it contained?
+    expect: agent-harness/ARCHITECTURE.md#Security checklist
+  - q: How do I replay decisions with a new policy file?
+    expect: agent-harness/ARCHITECTURE.md#Decision replay
+  - q: 備份怎麼做？ZFS 快照保留多久？
+    expect: agent-harness/ARCHITECTURE.md#Backups
+  - q: What do the kill switch states cloud and all do?
+    expect: [agent-harness/ARCHITECTURE.md#Kill switch, agent-harness/README.md#Usage]
+  - q: How are Copilot AI credits tracked against the budget?
+    expect: agent-harness/ARCHITECTURE.md#Copilot credit tracking
+  - q: 記憶要怎麼檢視和刪除？episode 多久過期？
+    expect: ["agent-harness/ARCHITECTURE.md#Memory review UI", "agent-harness/ARCHITECTURE.md#Memory, RAG, todos"]
+  - q: Which domains are allowed through the egress proxy?
+    expect: agent-harness/ARCHITECTURE.md#Egress allowlist
+  - q: How do I run the test suite?
+    expect: agent-harness/README.md#Tests
+  - q: How is the nodeReact agent page built and deployed?
+    expect: agent-harness/README.md#nodeReact integration
+  - q: 第一次安裝要怎麼設定 .env 和啟動？
+    expect: agent-harness/README.md#Setup

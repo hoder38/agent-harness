@@ -111,6 +111,10 @@ class GroundedState(MessagesState, total=False):
     check_failures: list[str]
     shopping: bool                      # this turn runs the shopping branch (§12c)
     shop: dict[str, Any] | None         # kept across turns: {slots, products, picks, terms, at_ms, fetched}
+    memories: list[dict[str, Any]]      # long-term memories recalled for this turn (§10)
+    kb_hits: list[dict[str, Any]] | None  # knowledge-base hits for `kb_query` (searched once, before clarifying)
+    kb_query: str | None
+    memories_query: str | None
 
 
 def new_budget() -> Budget:

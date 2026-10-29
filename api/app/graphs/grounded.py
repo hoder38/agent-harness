@@ -4,6 +4,7 @@ Search/fetch are called by nodes (not LLM tool-calling), so per-turn budgets are
 Only `compose` is streamed to the user; every other LLM call is internal.
 """
 import json
+import logging
 import re
 import time
 from datetime import datetime
@@ -19,6 +20,7 @@ from langgraph.types import interrupt
 
 from .. import state as rstate
 from ..gates.jev_router import TASK_LABELS
+from ..memory import as_prompt as memory_prompt
 from ..models import LOCAL_MODELS
 from ..tools import authority as auth
 from ..tools import shop as shopmod
@@ -26,9 +28,36 @@ from ..tools import sources as src
 from .grounded_state import Claim, GroundedState, new_budget
 from .main import BASE_SYSTEM, trim_history
 
+log = logging.getLogger(__name__)
 COMPOSE_NODE = "compose"
 MAX_TRIES = 2  # research rounds per claim
 SKIP = "/skip"  # resume value meaning "answer with your assumption"
+KB_TIER = "kb"  # sources from the owner's documents (§10)
+
+
+async def _none(query: str, *, private: bool) -> list[dict]:
+    return []
+
+
+async def kb_search(query: str, *, private: bool) -> list[dict]:
+    """Owner's knowledge base (hybrid + rerank). Never fails the turn: no hits on any error."""
+    from ..rag import store
+
+    try:
+        return await store.search(query, private=private)
+    except Exception as e:  # noqa: BLE001
+        log.warning("kb search failed: %s", e)
+        return []
+
+
+async def recall_memories(query: str, *, private: bool) -> list[dict]:
+    from .. import memory
+
+    try:
+        return await memory.recall(query, private=private)
+    except Exception as e:  # noqa: BLE001
+        log.warning("memory recall failed: %s", e)
+        return []
 FACTUAL_KINDS = {"factual"}
 EXEMPT_KINDS = {"greeting", "creative", "opinion", "reasoning", "math", "instruction"}
 OVERRIDABLE_KINDS = {"opinion", "greeting", "instruction", "reasoning"}  # creative/math keep their label
@@ -213,12 +242,19 @@ def build_grounded_graph(
     search: Callable[..., Awaitable[dict]] | None = None,
     fetch: Callable[..., Awaitable[dict]] | None = None,
     products: Callable[..., Awaitable[dict]] | None = None,
+    kb: Callable[..., Awaitable[list[dict]]] | None = None,
+    recall: Callable[..., Awaitable[list[dict]]] | None = None,
     clock: Callable[[], float] = time.time,
     max_turns: int = 20,
 ):
     search = search or src.search_web
     fetch = fetch or src.fetch_source
     products = products or shopmod.search_products
+    rag_cfg = policy.get("rag") or {}
+    kb = kb or (kb_search if rag_cfg.get("enabled") else _none)
+    recall = recall or (recall_memories if (policy.get("memory") or {}).get("enabled") else _none)
+    kb_skip = set(rag_cfg.get("skip_task_types") or ["chitchat"])
+    kb_sure = float(rag_cfg.get("skip_clarify_score", 0.5))
     shop_cfg = policy.get("shopping") or {}
     shop_on = bool(shop_cfg.get("enabled"))
     shop_stores = [st for st in shop_cfg.get("stores") or ["pchome", "momo", "yahoo"] if st in shopmod.ADAPTERS]
@@ -328,14 +364,45 @@ def build_grounded_graph(
             "claims": [], "candidates": [], "judged": {}, "sources": {}, "queries": [], "searched": [], "loops": 0, "conflicts": [],
             "budget": new_budget(), "turn_started_ms": t, "clock_ms": t, "answer": None, "answer_body": "",
             "compose_round": 0, "check_failures": [], "shopping": False, "intent_answered": False,
-            "answer_task_type": None,
+            "answer_task_type": None, "memories": [], "kb_hits": None, "kb_query": None, "memories_query": None,
         }
+
+    async def kb_lookup(s: GroundedState) -> list[dict]:
+        """KB hits for the current question, searched once per question (clarifying first, then research)."""
+        if s.get("task_type") in kb_skip:
+            return []
+        if s.get("kb_query") == s["question"] and s.get("kb_hits") is not None:
+            return s["kb_hits"]
+        return await kb(s["question"], private=bool(s.get("private")))
+
+    async def memory_lookup(s: GroundedState) -> list[dict]:
+        if s.get("memories_query") == s["question"]:
+            return s.get("memories") or []
+        return await recall(s["question"], private=bool(s.get("private")))
 
     async def assess_ambiguity(s: GroundedState) -> dict[str, Any]:
         budget = dict(s["budget"])
         force = bool(s.get("force_clarify")) and budget["clarify_used"] == 0
         if s.get("skip_clarify"):
             return {}
+        kb_state: dict[str, Any] = {}
+        kb_note = ""
+        if mode == "cite_only":
+            # The owner's own documents settle what "it"/"my setup" means: don't ask what they already answer
+            # (this also overrides the router's "ambiguous" flag: the router cannot see the documents).
+            hits = await kb_lookup(s)
+            mems = await memory_lookup(s)
+            kb_state = {"kb_hits": hits, "kb_query": s["question"], "memories": mems, "memories_query": s["question"]}
+            if mems:
+                kb_note += ("\nAlready known about the owner (never ask for these; answer from them):\n"
+                            + "\n".join(f"- {m['text']}" for m in mems))
+            if any((h.get("score") or 0) >= kb_sure for h in hits):
+                return {"budget": budget, "pending_ask": None, **kb_state}
+            if hits:
+                kb_note += ("\nThe owner's own documents have passages that may answer this: "
+                           + "; ".join(" › ".join(x for x in (h.get("title"), (h.get("heading") or "").split(" › ")[-1])
+                                                 if x) for h in hits[:5])
+                           + ". If the request is about these, it is not ambiguous.")
         history = plain_history(s["messages"], max_turns)[:-1]
         sysmsg = (
             "Decide whether to ask the user ONE more question before answering. Ask (ambiguous=true) when: the "
@@ -350,28 +417,28 @@ def build_grounded_graph(
             + (" The request was flagged as ambiguous by the router: ask the most useful question." if force else "")
             + "\nReply with JSON only: {\"ambiguous\": true|false, \"slot\": \"referent|scope_time|scope_region|version|"
             "goal|conflict\", \"question_to_user\": \"one short question in the user's language\", \"options\": "
-            "[up to 3 short options], \"assumption_if_skipped\": \"the assumption you would make instead\"}")
+            "[up to 3 short options], \"assumption_if_skipped\": \"the assumption you would make instead\"}" + kb_note)
         try:
             raw = await call(s, budget, "assess_ambiguity", sysmsg,
                              [*history[-6:], HumanMessage(f"Latest request (with clarifications so far):\n{s['question']}")],
                              300)
         except Exhausted:
-            return {"budget": budget}
+            return {"budget": budget, **kb_state}
         data = parse_json(raw) or {}
         ambiguous = bool(data.get("ambiguous")) or force
         question = str(data.get("question_to_user") or "").strip()
         assumption = str(data.get("assumption_if_skipped") or "").strip()
         asked_before = {re.sub(r"\W+", "", str(c.get("question") or "")) for c in s.get("clarifications") or []}
         if not ambiguous or (not force and re.sub(r"\W+", "", question) in asked_before):  # no loops
-            return {"budget": budget, "pending_ask": None}
+            return {"budget": budget, "pending_ask": None, **kb_state}
         if budget["clarify_used"] >= max_clarify:
-            return {"budget": budget, "pending_ask": None,
+            return {"budget": budget, "pending_ask": None, **kb_state,
                     "assumptions": s.get("assumptions", []) + ([assumption] if assumption else [])}
         if not question:
             question = ("你指的是哪一個？可以再多說一點嗎？" if lang_of(s["question"]) == "zh"
                         else "Could you tell me a bit more about what you mean?")
         options = [str(o)[:60] for o in (data.get("options") or []) if str(o).strip()][:3]
-        return {"budget": budget, "pending_ask": {"question": question[:500], "options": options,
+        return {"budget": budget, **kb_state, "pending_ask": {"question": question[:500], "options": options,
                                                   "slot": str(data.get("slot") or "referent"),
                                                   "assumption": assumption}}
 
@@ -1026,8 +1093,27 @@ def build_grounded_graph(
     # quote checks, so no "Unverified" list; only the citation/URL check below.
     async def cite_research(s: GroundedState) -> dict[str, Any]:
         budget = dict(s["budget"])
-        if s.get("private"):
-            return {"budget": budget}
+        private = bool(s.get("private"))
+        # Owner's documents and memories first: local services, so PRIVATE threads get them too (local model).
+        mems = await memory_lookup(s)
+        kb_sources: dict[str, dict] = {}
+        for h in await kb_lookup(s):
+            sid = f"s{len(kb_sources) + 1}"
+            label = h.get("cite") or (h["path"] + (f"#{h['heading'].split(' › ')[-1]}" if h.get("heading") else ""))
+            date = h.get("date")
+            kb_sources[sid] = {
+                "id": sid, "url": f"kb:{label}", "final_url": f"kb:{label}", "domain": "kb", "kb_path": label,
+                "title": " › ".join(x for x in (h.get("title"), (h.get("heading") or "").split(" › ")[-1]) if x),
+                "tier": KB_TIER, "tier_reason": "owner's documents", "fetched_at": "",
+                "published_at": date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else date,
+                "text_sha256": "", "excerpt": (h.get("text") or "")[:cite_chars], "for_claims": [],
+                "verified": False, "score": h.get("score")}
+        base = {"sources": kb_sources, "memories": mems}
+        if private:
+            return {"budget": budget, **base}
+        kb_note = ("\nThe owner's own documents already returned: "
+                   + "; ".join(so["title"] for so in kb_sources.values())
+                   + ". If they are enough to answer, needs_web=false.") if kb_sources else ""
         sysmsg = (
             f"{now_line()}\nDecide whether answering the user's latest request needs a web search (facts, "
             "numbers, dates, prices, versions, news, specifications, anything that may have changed). Greetings, "
@@ -1035,16 +1121,17 @@ def build_grounded_graph(
             f"{min(max_search, 2)} search queries that find the official / primary source (use site:<domain> when the "
             "official domain is obvious). When unsure, search. freshness: pd|pw|pm|py for time-sensitive topics, else null.\n"
             "Reply with JSON only: {\"needs_web\": true|false, \"entity\": \"subject or null\", "
-            "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}")
+            "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}" + kb_note)
         try:
             raw = await call(s, budget, "plan_search", sysmsg,
                              [HumanMessage(f"Latest request (with clarifications so far):\n{s['question']}")], 300)
         except Exhausted as e:
             budget["exhausted"] = e.why
-            return {"budget": budget}
+            return {"budget": budget, **base}
         plan = parse_json(raw) or {}
-        if not plan.get("needs_web") and not _FACT_HINT.search(s["question"]):
-            return {"budget": budget}
+        # The number/name heuristic overrides "no web" only when the owner's documents had nothing.
+        if not plan.get("needs_web") and (kb_sources or not _FACT_HINT.search(s["question"])):
+            return {"budget": budget, **base}
         entity = str(plan.get("entity") or "").strip() or None
         queries = [q for q in plan.get("queries") or [] if isinstance(q, dict) and str(q.get("query") or "").strip()]
         queries = queries or [{"query": s["question"][:200]}]
@@ -1071,9 +1158,9 @@ def build_grounded_graph(
                 ranked.append((auth.TIER_RANK[tier], "official site" not in reason, len(ranked), h, tier, reason))
         ranked.sort(key=lambda x: x[:3])
         focus = [w for w in re.findall(r"[\w.+-]{3,}", s["question"])][:10] + re.findall(r"[\u3400-\u9fff]{2,6}", s["question"])[:6]
-        sources: dict[str, dict] = {}
+        sources: dict[str, dict] = dict(kb_sources)
         for *_, h, tier, reason in ranked:
-            if len(sources) >= cite_pages or budget["fetch_used"] >= max_fetch or guard(s, budget):
+            if len(sources) - len(kb_sources) >= cite_pages or budget["fetch_used"] >= max_fetch or guard(s, budget):
                 break
             res = await fetch(h["url"], focus=focus + ([entity] if entity else []), max_chars=cite_chars,
                               ledger_key=f"{s.get('thread_id', '-')}:{s['turn_id']}")
@@ -1090,7 +1177,7 @@ def build_grounded_graph(
                             "fetched_at": datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d"),
                             "published_at": res.get("published_at"), "text_sha256": res.get("text_sha256", ""),
                             "excerpt": (res.get("excerpt") or "")[:cite_chars], "for_claims": [], "verified": False}
-        return {"budget": budget, "sources": sources, "searched": searched}
+        return {"budget": budget, "sources": sources, "searched": searched, "memories": mems}
 
     def cite_nums(s: GroundedState) -> dict[str, int]:
         return {sid: i for i, sid in enumerate(sorted(s.get("sources") or {}, key=lambda k: int(k[1:])), 1)}
@@ -1103,9 +1190,13 @@ def build_grounded_graph(
         lines = []
         for n, sid in cited.items():
             so = s["sources"][sid]
-            date = so.get("published_at") or f"{L['fetched']} {so.get('fetched_at')}"
             title = (so.get("title") or so["domain"]).strip()
             title = title if len(title) <= 80 else title[:79] + "…"
+            if so.get("tier") == KB_TIER:  # owner's document: path#heading, no URL
+                date = f" ({so['published_at']})" if so.get("published_at") else ""
+                lines.append(f"[{n}] 📄 {title} — {so['kb_path']}{date}")
+                continue
+            date = so.get("published_at") or f"{L['fetched']} {so.get('fetched_at')}"
             lines.append(f"[{n}] {title} — {so['final_url']} ({date})")
         if lines:
             parts.append(L["sources"] + "\n" + "\n".join(lines))
@@ -1140,9 +1231,14 @@ def build_grounded_graph(
             "is added automatically."
             if nums else "Answer the user's latest request directly. Do not write citations, URLs or a sources list.")
         extra = ("\nAssume: " + "; ".join(s["assumptions"])) if s.get("assumptions") else ""
+        if any(so.get("tier") == KB_TIER for so in (s.get("sources") or {}).values()):
+            rules += (" Sources marked kb: are the owner's own notes and documents: prefer them for questions about "
+                      "the owner's own projects, setup and decisions.")
+        mem = memory_prompt(s.get("memories") or [])
         sysmsg = (f"{BASE_SYSTEM}\n{now_line()}\n{rules} " + lang_rule(s)
                   + (" Plain text only, no markdown." if s.get("channel") == "line" else "")
-                  + (" Keep it very short." if s.get("model") == "local_cpu" else "") + extra)
+                  + (" Keep it very short." if s.get("model") == "local_cpu" else "") + extra
+                  + (f"\n\n{mem}" if mem else ""))
         blocks = "\n\n".join(f"<untrusted source=\"[{n}] {s['sources'][sid]['final_url']}\">\n"
                              f"{s['sources'][sid]['excerpt']}\n</untrusted>" for sid, n in nums.items())
         msgs = plain_history(s["messages"], max_turns)[:-1]

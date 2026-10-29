@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from . import config, db, state
+from . import config, db, memory, state
 from .decision import decide
 from .gates.gate0 import gate0
 from .gates.gate1_qwen import gate1
@@ -33,6 +33,9 @@ Routing (put at the start of a message):
 
 Clarifying questions:
 /skip - answer without clarifying (I state my assumption)
+
+Memory:
+/remember <fact> - save a fact or preference about you (review and edit them on the Memory page)
 
 Owner controls:
 /stop cloud - block all cloud model calls
@@ -76,6 +79,23 @@ async def handle_command(text: str, *, source: str) -> str | None:
     return f"killswitch={ks} gpu={gpu} spend today: {spend}"
 
 
+async def _remember(job: Job, fact: str) -> str:
+    """/remember <fact>: private when the thread or the fact is (or the fact holds any secret/PII), so it is only
+    recalled on PRIVATE runs (local models)."""
+    if not (config.policy().get("memory") or {}).get("enabled"):
+        return "Memory is turned off (policy memory.enabled)."
+    if not fact:
+        return "Usage: /remember <fact>, e.g. /remember I prefer answers in bullet points"
+    r = state.get_redis()
+    g0 = gate0(Job(**{**job.model_dump(), "text": fact}), config.privacy_rules(),
+               thread_private=await state.is_thread_private(r, job.thread_id))
+    private = g0.privacy_tag == "PRIVATE" or bool(g0.findings)
+    await memory.remember("profile", fact, private=private, kind="explicit",
+                          source={"thread_id": job.thread_id, "channel": job.channel})
+    await db.audit("memory", "remember", {"private": private, "channel": job.channel})
+    return "🧠 Remembered" + (" (private)" if private else "") + f": {fact}"
+
+
 def _with_clarification(request: str, question: str | None, answer: str) -> str:
     """Routing text for an answer to a clarifying question: the router judges the whole exchange."""
     parts = [request]
@@ -94,6 +114,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     skip = bool(_SKIP_RE.match(job.text or ""))
     if skip and not pending:
         return SubmitResult(command_reply="Nothing to skip: no question is waiting for an answer.")
+    if not skip and (fact := memory.parse_remember(job.text or "")) is not None:
+        return SubmitResult(command_reply=await _remember(job, fact))
     if not skip and (reply := await handle_command(job.text or "", source=job.channel)):
         return SubmitResult(command_reply=reply)
 

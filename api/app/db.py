@@ -87,7 +87,15 @@ async def open_db() -> AsyncConnectionPool:
     pool = get_pool()
     await pool.open(wait=True, timeout=60)
     async with pool.connection() as conn:
-        await conn.execute(SCHEMA, prepare=False)
+        await conn.execute("SELECT pg_advisory_lock(7310010)")  # api/workers/scheduler start together
+        try:
+            await conn.execute(SCHEMA, prepare=False)
+            from .rag.store import SCHEMA as RAG_SCHEMA  # late import: rag.store imports db
+            await conn.execute(RAG_SCHEMA, prepare=False)
+            from . import memory
+            await memory.open_store(pool)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(7310010)")
     return pool
 
 

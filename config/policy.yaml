@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: "2026-10-29.1"
+version: 2026-11-05.2
 
 thresholds:
   clarify_below: 0.8      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -125,3 +125,39 @@ gpu_governor:                # phase 4 (§11): app/governor.py, compose service 
 alerts:
   dedupe_s: 3600
   queue_age_s: 300
+
+rag:                         # phase 10 (§10): app/rag/, docs folder DOCS_DIR -> /docs, reranker service
+  enabled: true
+  embed_model: qwen3-embedding:0.6b   # 1024-dim; changing it needs a re-index (DROP TABLE chunks)
+  embed_ctx: 2048
+  embed_batch: 16
+  embed_keep_alive: 10m
+  extensions: [.md, .markdown, .txt]
+  max_file_kb: 2048
+  index_interval_min: 5      # scheduler cron re-scans the docs folder (unchanged files are skipped by hash)
+  chunk_min_tokens: 400
+  chunk_max_tokens: 800
+  chunk_overlap: 0.15
+  candidates: 50             # vector top-N and keyword top-N, fused by RRF
+  rrf_k: 60
+  rerank: true               # CPU cross-encoder (bge-reranker-v2-m3); RRF order if it is down
+  rerank_candidates: 10      # ~4.4 s/query on CPU (20 → ~8 s, no recall gain on the eval set)
+  rerank_timeout_s: 15
+  # A hit is kept if rerank score >= min_rerank_score OR vector sim >= min_vector_sim (reranker off: vector only).
+  # Measured: off-topic queries score <= 0.004 / sim <= 0.25; a 0.05+ rerank floor alone drops correct hits.
+  min_rerank_score: 0.01
+  min_vector_sim: 0.45
+  top_k: 5
+  skip_clarify_score: 0.5   # a KB hit this sure → no clarifying question (cite_only); weaker hits are hinted
+  skip_task_types: [chitchat]  # grounded graph does not search the KB for these
+
+memory:                      # phase 10 (§10): app/memory.py, LangGraph PostgresStore
+  enabled: true
+  auto_extract: true         # local model extracts profile/procedure facts after each turn (background queue)
+  min_chars: 6
+  max_ops_per_turn: 5
+  recall_k: 6
+  min_score: 0.5             # cosine similarity floor for recall into prompts
+  extract_context_min_score: 0.3
+  episode_idle_s: 1800       # a thread idle this long with new turns gets an episode summary
+  episode_ttl_days: 180      # episodes expire unless pinned

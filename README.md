@@ -57,6 +57,7 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `d
 - Routing overrides: `/local`, `/cloud`, `/code` (coding sandbox, see Coding below). Private content is detected automatically (PII/secrets/keywords) and stays local.
 - Owner commands: `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other `/word` replies with the command list.
 - `/skip` (web or LINE) skips an open clarifying question; the answer then states its assumptions.
+- `/remember <fact>` saves a long-term memory (private if the thread or the fact is private).
 
 **Web tools** (chat/assistant routes; never on PRIVATE threads)
 - `web_search` uses the Brave Search API and needs `BRAVE_API_KEY`; without the key it is not offered.
@@ -95,6 +96,28 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `d
 - `config/policy.yaml` and `config/privacy_rules.yaml` hot-reload.
 - Test a policy change with: `docker compose exec agent-api python -m app.tools.replay --policy /config/policy.next.yaml --since 14d`
 
+## Knowledge base & memory (phase 10, ARCHITECTURE.md §10)
+
+- **Docs folder:** Markdown/text files under `DOCS_DIR` (default `~/agent-docs`, mounted read-only at `/docs`) are indexed every 5 minutes.
+  - A file is PRIVATE when its frontmatter has `privacy: private`, it is under a `private/` folder, or it contains a private keyword or secret.
+  - Answers cite these files as `[n] 📄 title — path#heading`.
+- **Reranker:** the `reranker` service runs `bge-reranker-v2-m3` on CPU and takes about 4 s per query. If it is down, search falls back to RRF.
+- **Memories:**
+  - Saved by `/remember`, by the `remember` tool, or by automatic extraction after each turn (local Qwen, on the background queue).
+  - Idle threads are summarised into episodes, which expire after 180 days unless pinned.
+  - Review them on nodeReact `/Memory`.
+- **Endpoints** (all under `/api/agent`, owner token):
+  - `GET /memories?namespace=&q=`, `POST /memories`, `PUT /memories/{ns}/{key}` with `{text?, pinned?, privacy?}`, `DELETE /memories/{ns}/{key}`.
+  - `GET /kb/documents`, `POST /kb/documents` with `{title, text, private}` (an upload), `DELETE /kb/documents/{id}` (uploads only).
+  - `GET /kb/search?q=&rerank=`, `POST /kb/reindex`.
+
+```bash
+docker compose exec -T agent-worker-bg python -m app.tools.index_docs          # index now
+docker compose exec -T agent-worker-bg python -m app.tools.rag_eval --both -v  # recall@5 / MRR on config/rag_eval.yaml
+```
+
+The eval cases in `config/rag_eval.yaml` expect `agent-harness/ARCHITECTURE.md` and `README.md` under the docs folder. Copy them with `mkdir -p ~/agent-docs/agent-harness && cp ARCHITECTURE.md README.md ~/agent-docs/agent-harness/`.
+
 ## nodeReact integration (deployed in /home/hoder/nodeReact)
 
 - `config/nginx-release.conf`: `/api/agent/` and `/line/webhook` proxy to `agent-api:8000` (network `anomopi_default`).
@@ -105,6 +128,7 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `d
 - Deploy front-end changes:
   1. Build the bundle with `docker run --rm -v $PWD/src:/app/src -v $PWD/public:/app/public -w /app reactnode-server:v1.0 ./node_modules/.bin/webpack --config config/webpack.release.config.cjs`.
   2. Rebuild and restart nginx with `docker compose -f docker-compose.release.yml build nginx && docker compose -f docker-compose.release.yml up -d --no-deps nginx`.
+- `src/front/components/Memory.js`: the `/Memory` page. It lists memories by namespace with search, edit (with history), pin, a privacy toggle and delete. Its Knowledge base tab lists documents, tests searches, adds notes and starts a re-index. The backend nav entry also needs `docker compose -f docker-compose.release.yml build reactnode-server && … up -d --no-deps reactnode-server`.
 - `integrations/nodereact/` keeps the original reference snippets.
 
 ## Tests

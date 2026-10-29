@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     line_api_base: str = "https://api.line.me"
 
     docker_host: str = "http://socket-proxy-ro:2375"
-    ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING
+    ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING; RAG embeddings
+    reranker_url: str = ""                             # §10 CPU cross-encoder; empty = RRF order only
+    docs_root: str = "/docs"                           # §10 read-only docs folder indexed for RAG
     compose_project: str = "agent-harness"
 
     policy_path: str = "/config/policy.yaml"

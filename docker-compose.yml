@@ -2,6 +2,7 @@ name: agent-harness
 
 # MVP = phases 1, 2, 3 + 8; + phase 4 gpu-governor, 8a grounded answering, 8b-read browser (ARCHITECTURE.md §15).
 # + phase 5 coding route: sandbox-manager, socket-proxy-rw, sandbox image (§9a).
+# + phase 10 RAG + memory: reranker (CPU cross-encoder), docs folder mounted read-only at /docs (§10).
 # Later phases add media-worker and syncthing.
 
 x-proxy-env: &proxy-env
@@ -9,8 +10,8 @@ x-proxy-env: &proxy-env
   HTTPS_PROXY: http://egress-proxy:4750
   http_proxy: http://egress-proxy:4750
   https_proxy: http://egress-proxy:4750
-  NO_PROXY: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
-  no_proxy: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,localhost,127.0.0.1,0.0.0.0
+  NO_PROXY: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,reranker,localhost,127.0.0.1,0.0.0.0
+  no_proxy: litellm,ollama,sandbox-manager,agent-postgres,agent-redis,phoenix,socket-proxy-ro,egress-proxy,browser,reranker,localhost,127.0.0.1,0.0.0.0
 
 x-app-env: &app-env
   <<: *proxy-env
@@ -33,13 +34,16 @@ x-app-env: &app-env
   OTEL_EXPORTER_OTLP_ENDPOINT: http://phoenix:6006
   SANDBOX_MANAGER_URL: http://sandbox-manager:8200
   CODING_CONFIG_PATH: /config/coding.yaml
+  OLLAMA_URL: http://ollama:11434
+  RERANKER_URL: http://reranker:8300
+  DOCS_ROOT: /docs
   TZ: Asia/Taipei
 
 x-app: &app
   build: { context: ./api, target: runtime }
   image: agent-harness-api:latest
   environment: *app-env
-  volumes: ["./config:/config:ro"]
+  volumes: ["./config:/config:ro", "${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro"]
   restart: unless-stopped
   networks: [agent]
   depends_on:
@@ -231,6 +235,25 @@ services:
       retries: 3
       start_period: 20s
 
+  reranker:                                  # §10 bge-reranker-v2-m3 on CPU; model downloaded via squid into `hf`
+    build: ./reranker
+    image: agent-harness-reranker:latest
+    environment:
+      <<: *proxy-env
+      RERANK_THREADS: "8"
+    volumes: [hf:/hf]
+    mem_limit: 4g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [agent]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8300/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 600s                     # first start downloads ~2.3 GB
+
   socket-proxy-ro:                           # read-only Docker API for the health watcher and gpu-governor
     image: tecnativa/docker-socket-proxy:latest
     environment: { CONTAINERS: "1", EVENTS: "1", POST: "0" }
@@ -280,7 +303,7 @@ services:
     restart: unless-stopped
     networks: [dockerctl]
 
-volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {} }
+volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {}, hf: {} }
 
 networks:
   agent: { internal: true }

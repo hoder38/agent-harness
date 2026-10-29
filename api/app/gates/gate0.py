@@ -55,6 +55,26 @@ def _compile_extra(rules: dict[str, Any]) -> list[Pattern]:
     return out
 
 
+def redact(text: str, rules: dict[str, Any] | None = None) -> tuple[str, list[str], list[str]]:
+    """(redacted text, finding names, names of matched `private` patterns)."""
+    findings: list[str] = []
+    private_hits: list[str] = []
+    redacted = text
+    for pat in BUILTIN_PATTERNS + _compile_extra(rules or {}):
+        def _sub(mm: re.Match[str], pat: Pattern = pat) -> str:
+            if pat.validator and not pat.validator(mm.group(0)):
+                return mm.group(0)
+            if pat.name not in findings:
+                findings.append(pat.name)
+            return f"[REDACTED:{pat.name}]"
+
+        new = pat.regex.sub(_sub, redacted)
+        if new != redacted and pat.private:
+            private_hits.append(pat.name)
+        redacted = new
+    return redacted, findings, private_hits
+
+
 def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool = False) -> Gate0Result:
     rules = rules or {}
     text = job.text or ""
@@ -68,22 +88,9 @@ def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool
     if override:
         reasons.append(f"override=/{override}")
 
-    findings: list[str] = []
-    private = False
-    redacted = text
-    for pat in BUILTIN_PATTERNS + _compile_extra(rules):
-        def _sub(mm: re.Match[str], pat: Pattern = pat) -> str:
-            if pat.validator and not pat.validator(mm.group(0)):
-                return mm.group(0)
-            if pat.name not in findings:
-                findings.append(pat.name)
-            return f"[REDACTED:{pat.name}]"
-
-        new = pat.regex.sub(_sub, redacted)
-        if new != redacted and pat.private:
-            private = True
-            reasons.append(f"pattern {pat.name} marks PRIVATE")
-        redacted = new
+    redacted, findings, private_hits = redact(text, rules)
+    private = bool(private_hits)
+    reasons += [f"pattern {n} marks PRIVATE" for n in private_hits]
     if findings:
         reasons.append("redacted: " + ",".join(findings))
 

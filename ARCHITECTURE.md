@@ -418,6 +418,52 @@ Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and
 - **Todos:** single table `todos(id, title, notes, status, due_at, source_channel, created_at, updated_at)` — used by nodeReact UI (REST), agents (tools), Copilot (MCP).
 - Retrieval eval set: 30–50 real questions with expected sources; track recall@5.
 
+### Implemented 2026-10-29 (phase 10)
+
+**Knowledge base (`api/app/rag/`)**
+- Corpus: a read-only docs folder (`DOCS_DIR`, default `~/agent-docs`, mounted at `/docs`) plus uploads via `POST /api/agent/kb/documents` (stored in Postgres only). The vault in §10a will be a second root.
+- `index_docs_cron` rescans every `rag.index_interval_min` (5) minutes under a Redis lock. A file is re-indexed only when its hash changes. The hash covers the text, chunk settings, `chunking.VERSION` and embed model. Embeddings are reused per (model, title, chunk hash). Files that disappear are removed, but nothing is removed when the root itself is missing.
+- Chunking is heading-aware, ≤ 800 tokens with 15% paragraph overlap. Each section is chunked on its own so a citation's heading is exact, which means many chunks are under 400 tokens. A tiny intro is merged only into its own following subsection, never into a sibling.
+- Embeddings: `qwen3-embedding:0.6b` via Ollama (1024 dims, HNSW). Queries get the instruct prefix. While GAMING the model is loaded with `num_gpu: 0`.
+- Search:
+  - vector top-50 + keyword top-50 (Postgres `simple` tsvector; CJK indexed as character bigrams), fused with RRF;
+  - then the top 10 go to the CPU cross-encoder `reranker` service (`bge-reranker-v2-m3`), then the top 5, at most one chunk per (path, heading);
+  - a hit is kept if its rerank score ≥ 0.01 **or** its vector similarity ≥ 0.45;
+  - if the reranker is down or times out, results stay in RRF order with the vector floor.
+- Privacy:
+  - A document is PRIVATE when its frontmatter says `privacy: private`, it sits in a `private/` folder, it contains a private keyword, or it contains a high-confidence secret pattern.
+  - Contact details and `api_key: os.environ/...` config examples do not make a document PRIVATE.
+  - PRIVATE chunks are returned only for private runs, which use local models.
+  - On non-private searches, hits are redacted with the Gate 0 rules.
+- **Measured recall@5** on `config/rag_eval.yaml` (33 zh/en questions about this repo's docs; `python -m app.tools.rag_eval --both`, results stored in `rag_eval_runs`):
+
+  | Configuration | recall@5 | MRR | ms/query |
+  |---|---|---|---|
+  | Rerank (10 candidates) | **1.000** | 0.872 | ~4400 |
+  | RRF only (reranker down) | 0.879 | 0.828 | ~7 |
+
+  Settings sweep:
+  - 20 rerank candidates gave no recall gain and took ~8 s.
+  - Using the rerank score alone as a floor (≥ 0.05–0.2) dropped correct hits: cross-language paraphrases score near 0, so recall fell to 0.73–0.85.
+  - Off-topic queries scored ≤ 0.004 on rerank and ≤ 0.25 on vector similarity, so the either/or floor keeps them out.
+
+**Long-term memory (`api/app/memory.py`, LangGraph `AsyncPostgresStore` with a pgvector index on `text`)**
+- Namespaces: `("me", profile | procedures | episodes | coding_episodes)`.
+- Each item stores `{text, privacy, pinned, kind, source, history}`.
+- Writes:
+  - Explicit `/remember <fact>` (web/LINE; the fact is private if the thread or fact is private, or Gate 0 finds anything) and the `remember` tool.
+  - **Automatic extraction:** after each non-coding turn, an `extract_memory` job on the background queue asks the local Qwen for add/update/delete ops. Update/delete may touch only the memories the extractor was shown.
+  - **Episodes:** a thread idle for 30 minutes (with ≥ 2 turns) is summarised into `episodes` (key = thread id; expires after 180 days unless pinned; `sweep_memory_ttl` runs hourly).
+  - Background jobs defer while GAMING or when the kill switch is `all`.
+- Conflicts: the newest text wins and the previous 5 versions are kept in `history`.
+- Recall:
+  - **Grounded `cite_only` graph:** memories (score ≥ 0.5, pinned first) and KB hits are fetched once per question, *before* the clarifying step. The clarifier is told what is already known, so it doesn't ask for it. A KB hit with rerank ≥ `rag.skip_clarify_score` (0.5) skips the question, even when the router flagged the request ambiguous, because the router cannot see the documents.
+  - Memories go into the compose prompt as notes "that may be outdated". KB hits become sources `[n] 📄 title — path#heading` before any web sources. If they answer the question, no web search runs.
+  - Private threads get KB and memories but no web.
+  - ReAct chat/assistant also get the `search_knowledge`, `recall_memory` and `remember` tools.
+- Coding runs neither recall nor extract.
+- Not yet: "every agent memory write is visible in the Inbox" (§19). The Inbox is phase 7. Every write (`/remember`, tool, extraction, UI edit/delete) is audit-logged (kind `memory`, keys only) and visible on the Memory page.
+
 ## 10a. Knowledge bank — local Obsidian vault
 
 The vault is plain Markdown on the host and is the **human-curated source of truth** for
@@ -639,7 +685,7 @@ async def fetch_source(url: str, *, focus: list[str], max_chars=8000,
 - **Focus windows:** ±600 chars around matches of claim keywords/numbers, merged up to `max_chars` (avoids the fixed head truncation cutting the evidence).
 - HTTP 429/errors still consume one unit (no retry loops). PDFs are unsupported for now → claim unverified ("primary source is a PDF"); Docling later.
 - `published_at` from `article:published_time`, `<time datetime>`, or `Last-Modified`.
-- PRIVATE: `kb_search()` / `kb_read()` with the same interfaces (`domain = vault:<path>`); until §10a ships they return `error="local KB not available"`.
+- PRIVATE: `kb_search()` / `kb_read()` with the same interfaces (`domain = vault:<path>`); until §10a ships they return `error="local KB not available"`. (Phase 10: in the default `cite_only` mode, private threads already cite the owner's KB from §10, with no web; verify mode below is unchanged.)
 
 ### Authority tiers (`config/authority.yaml`) — rules first, LLM only for edge cases
 ```yaml
@@ -1030,7 +1076,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 8b-login | Interactive browsing + owner login (§12b stage 2) — planned | §12b stage 2 acceptance list |
 | 8c | Shopping: clarify item/budget, recommend real store listings (§12c) — **implemented 2026-10-28** (web verified live; LINE not yet tested live) | A missing budget is asked with option buttons; every pick is a real listing with code-rendered price/store/link; 「cheaper」 lowers the ceiling; unrelated listings are filtered |
 | 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
-| 10 | RAG + long-term memory + eval set + **memory review UI** | recall@5 measured on eval set; memories editable/deletable in nodeReact |
+| 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 11 | Cron/events, eval suite in CI, monthly restore test | Morning brief runs; eval regression check; restore test passes |
 
@@ -1129,7 +1175,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Page listing `PostgresStore` items by namespace with search, edit, delete, and "pin".
 - Episodes expire after a configurable TTL (default 180 days) unless pinned.
 - Conflicting facts: newest wins, previous kept as history; UI shows history.
-- Every agent memory write is visible in the Inbox as a low-priority item.
+- Every agent memory write is visible in the Inbox as a low-priority item. (Implemented 2026-10-29 as nodeReact `/Memory`: memories plus a knowledge-base tab; Inbox items wait for phase 7.)
 
 ### Health checks & LINE alerts
 - Compose `healthcheck` on every service; `alert-watcher` job (agent-scheduler, every minute) checks: unhealthy containers, queue age > threshold, jobs stuck > timeout, LiteLLM spend > 80%, backup failure, disk/ZFS pool > 85% or not ONLINE, gpu-governor heartbeat missing.

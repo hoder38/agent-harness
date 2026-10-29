@@ -15,3 +15,7 @@ extra_patterns: []
 # Keywords that mark a message PRIVATE outright (case-insensitive substring match).
 private_keywords: []
 #  - "my salary"
+
+# Docs-folder subfolders (any level) whose documents are PRIVATE (RAG §10). Frontmatter `privacy: private` also works.
+private_doc_dirs:
+  - private
