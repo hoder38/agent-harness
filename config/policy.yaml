@@ -1,17 +1,21 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: "2026-10-28.3"
+version: "2026-10-29.1"
 
 thresholds:
   clarify_below: 0.8      # intent confidence < this -> route=clarify on a local model (no tier bump)
   ambiguous: 0.7          # router `ambiguous` (unclear referent) above this -> route=clarify (same handling)
   heavy: 0.6              # code_multi / long_ctx above this -> cloud_strong
   risky: 0.5              # router risky above this -> risky=True
+  task_confirm_below: 0.7 # top task_type probability < this ...
+  task_margin: 0.3        # ... or top-2 gap < this -> ask the owner which kind of answer (clarify.confirm_task_types)
+  correction: 0.6         # router `correction` above this -> re-route previous + current message as one request
 
 clarify:
   max_rounds: 10          # after this many clarify turns in a row, answer with stated assumptions
   context_ttl_s: 86400    # how long the next message counts as the answer to a clarifying question
   previous_ttl_s: 3600    # the previous message is sent to the router as context for this long
+  confirm_task_types: [shopping]  # only ask "which kind of answer?" when one of the top-2 types is in here
 
 # Per-turn caps on tool calls (one user turn, across clarify resumes).
 tool_limits:
@@ -34,9 +38,10 @@ grounding:
   pending_ttl_s: 86400              # an unanswered clarifying question expires after this
   # Qwen3.x thinking on local (GPU) for the listed steps only; others run with think=false. Thinking eats
   # max_tokens, so these calls get local_think_tokens extra. Never on local_cpu. Measured 2026-10-28 with
-  # [verify_support, compose] on qwen3.5:9b: ~140 s/turn, blows max_active_s, empty answers -> keep off.
-  local_think_tasks: []
-  local_think_tokens: 2048
+  # [verify_support, compose] on qwen3.5:9b: ~140 s/turn, blows max_active_s, empty answers. 2026-10-29 bench
+  # (compose only, 11 prompts): 6.3 -> 7.1/10 judged quality, 7 -> 22 s, up to ~4.6k thinking tokens.
+  local_think_tasks: [compose]
+  local_think_tokens: 4096
 
 # §12c shopping: requests to choose/buy a product (推薦/想買/預算/… hints, or a follow-up within session_ttl_s)
 # fill slots (item, budget, use, specs, must-haves, brand, store), ask what is unknown one question per round

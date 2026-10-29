@@ -104,12 +104,15 @@ async def _graph_input(graph, cfg: dict, payload: dict[str, Any], job: Job, deci
     resume = payload.get("resume")
     if grounded and resume and snap.interrupts:
         return Command(resume=resume.get("value") or SKIP,
-                       update={"run_id": run_id, "model": model, "private": decision.private, "channel": job.channel})
+                       update={"run_id": run_id, "model": model, "private": decision.private, "channel": job.channel,
+                               "answer_task_type": decision.task_type})
     msg = HumanMessage(payload["text"], id=run_id)
     if not grounded:
         return {"messages": [msg]}
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
-            "private": decision.private, "model": model, "force_clarify": decision.route == "clarify"}
+            "private": decision.private, "model": model, "force_clarify": decision.route == "clarify",
+            "task_type": decision.task_type, "confirm_task": decision.confirm_task,
+            "correction": payload.get("correction")}
 
 
 def _line_question(q: dict[str, Any], zh: bool) -> str:
@@ -211,8 +214,9 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         short_s = float(gov.get("inflight_short_s", 20))
         last_check = 0.0
         stream_id = None
+        echo = ""  # "我理解為：…" line from the grounded compose node, sent before each (re)written answer
         async with sem:
-            async for mode, data in graph.astream(inp, cfg, stream_mode=["messages", "updates"]):
+            async for mode, data in graph.astream(inp, cfg, stream_mode=["messages", "updates", "custom"]):
                 now = time.monotonic()
                 if now - last_check > CANCEL_POLL_S:
                     last_check = now
@@ -227,6 +231,10 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                     if isinstance(data, dict) and data.get("__interrupt__"):
                         asked = dict(data["__interrupt__"][0].value or {})
                     continue
+                if mode == "custom":
+                    if isinstance(data, dict) and data.get("echo"):
+                        echo = str(data["echo"])
+                    continue
                 chunk, cmeta = data
                 if isinstance(chunk, AIMessageChunk):
                     if chunk.usage_metadata:
@@ -235,6 +243,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                     if cmeta.get("langgraph_node") in answer_nodes and (piece := _text(chunk.content)):
                         if grounded and stream_id is not None and chunk.id != stream_id:
                             await state.emit(r, run_id, "reset", {"reason": "answer rewritten"})
+                        if chunk.id != stream_id and echo:
+                            await state.emit(r, run_id, "token", echo + "\n\n")
                         stream_id = chunk.id
                         streamed = True
                         await state.emit(r, run_id, "token", piece)

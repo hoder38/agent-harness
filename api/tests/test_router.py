@@ -85,3 +85,13 @@ async def test_everything_down_uses_rules():
 ])
 def test_rule_router(text, intent):
     assert rule_route(text).intent == intent
+
+
+@pytest.mark.parametrize("text,task", [
+    ("想買調味料罐 500以下", "shopping"),
+    ("推薦適合冷凍且富含纖維素的食材", "advice"),   # 推薦 alone is not a purchase
+    ("如何設定 VPN", "howto"),
+])
+def test_rule_router_task_type(text, task):
+    r = rule_route(text)
+    assert r.task_type == task and r.task_probs == {task: 0.6}

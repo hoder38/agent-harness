@@ -129,9 +129,22 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         text=router_text, redacted_text=router_redacted, private=private,
         gpu_state=gpu, killswitch=ks, policy=pol,
     )
+    corrected = None
+    corr_th = (pol.get("thresholds") or {}).get("correction", 0.6)
+    if prev and not pending and router.correction > corr_th:
+        # The owner says the last reply misread them: classify both messages as one request, from scratch.
+        corrected = {"text": f"{prev['text']}\n{g0.text}", "redacted_text": f"{prev['redacted_text']}\n{g0.redacted_text}"}
+        first = router
+        router = await route(
+            text=corrected["text"], redacted_text=corrected["redacted_text"], private=private,
+            gpu_state=gpu, killswitch=ks, policy=pol,
+        )
+        router.correction = first.correction
     decision = decide(job, g0, router, gpu, budget, pol, killswitch=ks, clarify_rounds=clarify_rounds,
                       resuming=bool(pending))
     decision.reasons = g0.reasons + decision.reasons
+    if corrected:
+        decision.reasons.append(f"correction {router.correction:.2f} > {corr_th}: re-routed previous + current message")
     if pending:
         # Answer to the grounded graph's question: keep the exchange for the next round's routing;
         # the worker clears it when the turn is done.
@@ -156,7 +169,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     elif clarify_ctx:
         await state.clear_clarify_ctx(r, job.thread_id)
     if not pending:
-        await state.set_prev_msg(r, job.thread_id, text=g0.text, redacted_text=g0.redacted_text,
+        latest = corrected or {"text": g0.text, "redacted_text": g0.redacted_text}
+        await state.set_prev_msg(r, job.thread_id, text=latest["text"], redacted_text=latest["redacted_text"],
                                  ttl_s=int(clarify_cfg.get("previous_ttl_s", 3600)))
     latency = int((time.monotonic() - t0) * 1000)
 
@@ -171,6 +185,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
             "clarify_rounds": clarify_rounds,
             **({"resume_of": pending["run_id"]} if pending else {}),
             **({"router_text": router_redacted} if router_redacted != g0.redacted_text else {}),
+            **({"correction_text": corrected["redacted_text"]} if corrected else {}),
         },
         router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),
         decision=decision.model_dump(), latency_ms=latency,
@@ -190,6 +205,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         "intent": router.intent,
         "delivery": delivery or {},
     }
+    if corrected:
+        payload["correction"] = corrected["text"] if private else corrected["redacted_text"]
     if pending:
         payload["resume"] = {"value": None if skip else model_text, "parent_run_id": pending["run_id"]}
         await state.set_run_meta(r, pending["run_id"], status="answered", answered_by=run_id)

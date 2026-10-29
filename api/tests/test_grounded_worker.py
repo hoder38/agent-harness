@@ -222,3 +222,28 @@ async def test_long_local_run_is_requeued_on_cloud_and_continues_from_checkpoint
     assert (await worker.run_agent(ctx, payload))["status"] == "done"
     assert box["models"] == ["local", "cloud_fast"]
     assert box["llm"].calls.count("draft") == 1  # continued, not restarted
+
+
+async def test_task_type_question_then_answer_streams_the_understanding_line_first(redis, enq, llm, monkeypatch):
+    async def fake_route(**kw):
+        return RouterResult(intent="chat", intent_confidence=0.95, tier="local", source="jev", task_type="shopping",
+                            task_probs={"shopping": 0.5, "advice": 0.45})
+
+    monkeypatch.setattr(pipeline, "route", fake_route)
+    web = Web(hits={"": ["https://openai.com/pricing"]}, pages={"https://openai.com/pricing": "GPT-9 costs $20 per month."})
+    llm({"draft": "GPT-9 costs $20 per month.", "extract_claims": FACT,
+         "plan_queries": {"queries": [{"query": "gpt-9 price", "claims": ["c1"]}]},
+         "verify_support": verify(("c1", "supports", "GPT-9 costs $20 per month")),
+         "compose": "GPT-9 costs $20 per month [1]."}, web)
+    ctx = CTX()
+    first = await pipeline.submit(job("gpt-9 plans", "a"), enq)
+    assert first.decision.confirm_task == ["shopping", "advice"]
+    assert (await worker.run_agent(ctx, enq.calls[-1]["payload"]))["status"] == "awaiting_input"
+    t, q = (await events(redis, first.run_id))[-1]
+    assert t == "interrupt" and q["options"] == ["Find a product to buy", "Knowledge or advice"]
+    second = await pipeline.submit(job("2", "b"), enq)
+    assert (await worker.run_agent(ctx, enq.calls[-1]["payload"]))["status"] == "done"
+    evs = await events(redis, second.run_id)
+    echo = 'My understanding: Knowledge or advice — "gpt-9 plans"'
+    assert "".join(d for t, d in evs if t == "token") == f"{echo}\n\nGPT-9 costs $20 per month [1]."
+    assert evs[-1][1]["text"].startswith(f"{echo}\n\nGPT-9 costs $20 per month [1].\n\nSources:")

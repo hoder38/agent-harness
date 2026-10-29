@@ -56,6 +56,9 @@ class RouterResult(BaseModel):
     long_ctx: float = 0.0
     code_multi: float = 0.0
     ambiguous: float = 0.0    # needs a clarifying question even given the previous message
+    task_type: str | None = None              # jev_router.TASK_TYPES key: what kind of answer is wanted
+    task_probs: dict[str, float] = {}         # probability per task type (best effort for LLM/rule routers)
+    correction: float = 0.0   # the message corrects how the previous one was understood
     source: Literal["jev", "qwen", "cloud_fast", "rules"]
     latency_ms: int = 0
     errors: list[str] = []
@@ -85,4 +88,6 @@ class Decision(BaseModel):
     queue: Queue
     risky: bool
     private: bool = False
+    task_type: str | None = None
+    confirm_task: list[str] = []    # ≥2 task types to ask the owner to choose between (low router confidence)
     reasons: list[str]

@@ -83,6 +83,11 @@ class GroundedState(MessagesState, total=False):
     private: bool
     model: str
     force_clarify: bool
+    task_type: str | None               # router's (or the owner's confirmed) jev_router.TASK_TYPES key
+    confirm_task: list[str]             # ask the owner to pick between these task types first
+    answer_task_type: str | None        # router's reading of a free-text answer to that question
+    intent_answered: bool               # internal: the last wait_answer answered the task-type question
+    correction: str | None              # previous + current message when this turn corrects the last reply
     question: str                       # turn text + clarification answers
     clarifications: list[Clarification]
     assumptions: list[str]

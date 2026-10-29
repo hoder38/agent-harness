@@ -213,8 +213,19 @@ questions = {
   "code_multi": Noul(instructions="Requires changing code across multiple files"),
   "ambiguous": Noul(instructions="Refers to something by a pronoun or vague word (that, it, 那個, 它) "
                                  "whose meaning is not given in the message or the previous message"),
+  "task_type": Choice(instructions="What kind of answer the user wants for the current message",
+     criteria=TASK_TYPES),  # shopping | advice | factual | howto | chitchat (jev_router.py)
+  "correction": Noul(instructions="The current message says the reply to the previous message misunderstood it, "
+                                  "or restates what the user actually wanted (不是…, 我是說…, I meant…)"),
 }
 ```
+**Task type and corrections (2026-10-29).** `task_type` picks the graph branch (only `shopping` searches stores);
+`RouterResult.task_probs` keeps Jev's probability per type. The Qwen/cloud router returns `task_type` +
+`task_confidence`; the rule router uses explicit purchase words (想買/購買/預算/500以下, buy) → shopping, how-to words
+→ howto, else advice. A `correction` > `thresholds.correction` (0.6) with a previous message makes the pipeline route
+`previous + "\n" + current` again as one fresh request (the first result is discarded) and pass that text to the graph
+as `correction`; the graph answers it and drops the shopping session. Measured on Jev: real corrections 0.95,
+other follow-ups ≤ 0.1; 「推薦適合冷凍且富含纖維素的食材」 → advice 1.0, 「想買調味料罐 500以下」 → shopping 0.98.
 Router input is `[Previous message] … \n[Current message] …` when the thread had a message within
 `clarify.previous_ttl_s` (Redis `prevmsg:{thread_id}`), so follow-ups are not judged ambiguous on their own.
 `ambiguous` wording was calibrated on Jev (2026-10-22): broader "missing time/place/version" phrasing scored most
@@ -525,6 +536,7 @@ PRIVATE threads never use web tools; they may cite only the local knowledge base
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:
 - **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.8, or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (10, raised from 5 on 2026-10-28) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
+- **Confirm the task type (rule 3b, 2026-10-29):** when the top `task_type` probability < `thresholds.task_confirm_below` (0.7) or leads the second by < `thresholds.task_margin` (0.3), and one of the two is in `clarify.confirm_task_types` (`[shopping]`: only types that change the pipeline), `Decision.confirm_task` holds the two types and the grounded graph asks the owner to pick before anything else. Not asked on resumes, PRIVATE threads, non-chat routes or after `clarify.max_rounds`.
 - **Prompt rules:** `GROUNDING_WEB` (one primary source read with `fetch_page`, `[n]` citations, "(unverified)"/「（未驗證）」 labels, exempt kinds) or `GROUNDING_OFFLINE` (no invented sources; one "⚠️ 未驗證" line) on every non-clarify route; the clarify hint asks one question with ≤ 3 options.
 - **Tool caps:** `policy.yaml tool_limits` (`web_search: 3`, `fetch_page: 4`) per user turn; calls over the cap get an error `ToolMessage` without running.
 
@@ -811,8 +823,9 @@ Goal: the agent can navigate, click, fill forms and use sites where the owner is
 
 **Goal:** "幫我推薦調味料罐" should end with 3–5 real products the owner can buy. Each one shows its real price, store, rating and link. Before that, the bot asks for whatever is missing (item and budget). It is a branch of the grounded graph (§12a), so the web clarify UI and LINE resume work unchanged.
 
-- **Flow:** `ingest → shop_slots → (ask_user ⇄ wait_answer → shop_slots) → shop_search → shop_compose → shop_check → END`. Non-shopping turns fall through to `assess_ambiguity` as before. Private threads never shop.
-- **Trigger:** a narrow hint (推薦/想買/預算/價位/入手/比價/送禮…, recommend/buy/budget). "Price" alone does not trigger it, so factual price questions stay on the §12a path. A follow-up within `session_ttl_s` (30 min), such as "cheaper" or "another brand", refines the last search.
+- **Flow:** `ingest → [confirm_intent → ask_user ⇄ wait_answer] → shop_slots → (ask_user ⇄ wait_answer → shop_slots) → shop_search → shop_compose → shop_check → END`. Non-shopping turns go to `assess_ambiguity` as before. Private threads never shop.
+- **Trigger (2026-10-29):** the router's `task_type == "shopping"` (§6), not keywords or the slot model; 「推薦…」 alone is usually `advice`. When decision rule 3b flags the task type as unsure, `confirm_intent` asks 「你是想：1. 找商品購買 2. 知識或建議」 (options from `TASK_LABELS`, no LLM); a number or label picks the type, `/skip` keeps the router's pick, free text uses the router's reading of the exchange. A follow-up within `session_ttl_s` (30 min) that the router still classes as shopping, such as "cheaper" or "another brand", refines the last search.
+- **Echo line:** every grounded answer except chitchat starts with 「我理解為：<label>—「<request>」」 (code-built, also streamed first), so a misread is visible and can be corrected (§6 correction).
 - **Slots (one LLM call, JSON):** item, item_specific, search_terms (1–2 store keywords), budget_min/max, no_budget, use_case, brand_pref, must_have, avoid, remember. Code enforces the following, because a 9B model gets these wrong:
   - Budget and brand words (知名品牌/有品牌) are stripped from the search terms. Budgets become a price filter and brand preference becomes ranking.
   - An explicit budget in the user's own lines (`parse_budget`: 1000以下, 300到600, 大概1000, 2千以上, under $500) overrides the model's reading. The newest clarify answer wins.

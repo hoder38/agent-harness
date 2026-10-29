@@ -87,6 +87,13 @@ def decide(
                 locked.add("model")
             reasons.append(f"3: {' & '.join(why)} → clarify on {model}")
 
+    # 3b. unsure what kind of answer is wanted → the graph asks the owner to pick (options from task labels)
+    confirm_task = _confirm_task(router, th, policy, reasons)
+    if confirm_task and (route not in ("chat", "clarify") or private or resuming or clarify_rounds >= max_rounds):
+        reasons.append("3b: not asked (" + ("resuming" if resuming else "private" if private
+                       else "clarify cap" if clarify_rounds >= max_rounds else f"route={route}") + ")")
+        confirm_task = []
+
     # 4. heavy tasks
     heavy = th.get("heavy", 0.6)
     if (router.code_multi > heavy or router.long_ctx > heavy) and "model" not in locked:
@@ -152,4 +159,28 @@ def decide(
     if route == "defer":
         queue = "background"
 
-    return Decision(route=route, model=model, queue=queue, risky=risky, private=private, reasons=reasons)
+    return Decision(route=route, model=model, queue=queue, risky=risky, private=private,
+                    task_type=router.task_type, confirm_task=confirm_task, reasons=reasons)
+
+
+def _confirm_task(router: RouterResult, th: dict[str, Any], policy: dict[str, Any], reasons: list[str]) -> list[str]:
+    """Top-2 task types when the top one is unsure (< task_confirm_below) or barely ahead (margin < task_margin),
+    and only if one of them changes the pipeline (clarify.confirm_task_types). Single-probability routers
+    (LLM/rules) only confirm their own pick when it is one of those types."""
+    if not router.task_type:
+        return []
+    types = set((policy.get("clarify") or {}).get("confirm_task_types", ["shopping"]))
+    below, margin = th.get("task_confirm_below", 0.7), th.get("task_margin", 0.3)
+    probs = dict(router.task_probs) or {router.task_type: router.intent_confidence}
+    ranked = sorted(probs.items(), key=lambda kv: -kv[1])
+    top, p1 = ranked[0]
+    if len(ranked) > 1:
+        second, p2 = ranked[1]
+    elif top in types:
+        second, p2 = ("advice" if top != "advice" else "factual"), 1.0 - p1
+    else:
+        return []
+    if not types & {top, second} or (p1 >= below and p1 - p2 >= margin):
+        return []
+    reasons.append(f"3b: task_type {top}({p1:.2f}) vs {second}({p2:.2f}) → confirm with the owner")
+    return [top, second]

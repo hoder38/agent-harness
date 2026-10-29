@@ -138,8 +138,10 @@ docker compose run --rm agent-test python -m pytest -q -p no:cacheprovider
 
 **Clarify** (§12a): advice, plan and how-to questions now also ask, one per round (up to `clarify.max_rounds` 10), for missing details that would change the answer (goal, level, budget, platform…). Simple factual questions and greetings are answered directly.
 
+**Intent** (§6/§7): Jev also classifies `task_type` (找商品購買 / 知識或建議 / 事實查詢 / 操作教學 / 閒聊) and whether a message corrects the last reply. When the top type is unsure or close to the second (`thresholds.task_confirm_below` / `task_margin`) and shopping is one of them, the bot first asks 「你是想：1. … 2. …」. Answers start with 「我理解為：…」; a correction (「不是，我是說…」) re-classifies the previous + current message and drops the shopping session. Local thinking is on for `compose` only (`grounding.local_think_tasks`).
+
 **Shopping** (§12c, `tools/shop.py`)
-- "推薦…/想買…/預算…" asks one question per round, up to 10, about anything you haven't said: item, budget, use, 1–2 key specs, must-haves, brand, store. Each question has option buttons; Skip searches right away.
+- Requests the Jev router classes as `task_type=shopping` (想買…/預算…; 「推薦…」 alone is usually knowledge/advice) ask one question per round, up to 10, about anything you haven't said: item, budget, use, 1–2 key specs, must-haves, brand, store. Each question has option buttons; Skip searches right away.
 - It then recommends 3–5 real PChome, momo or Yahoo listings, with price, store, rating and link rendered by code.
 - Follow-ups within 30 min refine the search: 便宜一點 lowers the ceiling, and a named brand changes the ranking. Preferences stated with "以後/always" are saved in Redis `shop:prefs`.
 - Unrelated listings are filtered by name relevance. Shopee is not used because it serves a CAPTCHA.

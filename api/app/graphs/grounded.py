@@ -13,10 +13,12 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .. import state as rstate
+from ..gates.jev_router import TASK_LABELS
 from ..models import LOCAL_MODELS
 from ..tools import authority as auth
 from ..tools import shop as shopmod
@@ -45,10 +47,6 @@ _FACT_HINT = re.compile(
     r"priced|became|acquired)\b|"
     r"(發布|發表|推出|售價|價格|成立|位於|支援|上市|收購)", re.S)
 
-# Shopping requests (§12c). Deliberately narrower than "price": factual price questions stay on the normal path.
-_SHOP_HINT = re.compile(
-    r"推薦|想買|要買|購買|買什麼|買哪|哪裡買|預算|價位|入手|比價|划算|CP值|平價|便宜的|好用的|送禮|禮物|"
-    r"\b(recommend|buy|purchase|budget|shopping|cheapest|affordable|gift)\b|\bunder \$?\d", re.I)
 _BUDGET_WORDS = re.compile(r"(NT\$?|\$)?\s*\d[\d,]*\s*(元|塊)?\s*(以下|以內|以上|左右|上下)?|預算|價位|便宜|平價", re.I)
 _CHEAPER = re.compile(r"便宜一?點|更便宜|再便宜|便宜些|低一點|再低|省一點|\b(cheaper|less expensive|lower price)\b", re.I)
 _NO_BUDGET = re.compile(r"不限|隨便|都可以|沒差|無所謂|不拘|多少都|\b(any|no limit|whatever|doesn'?t matter)\b", re.I)
@@ -321,12 +319,16 @@ def build_grounded_graph(
     async def ingest(s: GroundedState) -> dict[str, Any]:
         human = next((m for m in reversed(s["messages"]) if isinstance(m, HumanMessage)), None)
         t = now_ms()
+        # A correction ("不是，我是說…") is answered as previous + current message, without the old shopping state.
+        corr = {"shop": None, "correction": None} if s.get("correction") else {}
         return {
-            "turn_id": s.get("run_id") or (human.id if human else ""), "question": _text(human.content) if human else "",
+            **corr, "turn_id": s.get("run_id") or (human.id if human else ""),
+            "question": s.get("correction") or (_text(human.content) if human else ""),
             "clarifications": [], "assumptions": [], "pending_ask": None, "skip_clarify": False, "draft": "",
             "claims": [], "candidates": [], "judged": {}, "sources": {}, "queries": [], "searched": [], "loops": 0, "conflicts": [],
             "budget": new_budget(), "turn_started_ms": t, "clock_ms": t, "answer": None, "answer_body": "",
-            "compose_round": 0, "check_failures": [], "shopping": False,
+            "compose_round": 0, "check_failures": [], "shopping": False, "intent_answered": False,
+            "answer_task_type": None,
         }
 
     async def assess_ambiguity(s: GroundedState) -> dict[str, Any]:
@@ -389,9 +391,11 @@ def build_grounded_graph(
         ask = s["pending_ask"] or {}
         value = interrupt({"type": "clarify", "round": s["budget"]["clarify_used"], "question": ask.get("question"),
                            "options": ask.get("options") or [], "private": bool(s.get("private"))})
-        out: dict[str, Any] = {"clock_ms": now_ms(), "pending_ask": None}
+        out: dict[str, Any] = {"clock_ms": now_ms(), "pending_ask": None, "intent_answered": False}
         value = "" if value is None else str(value).strip()
         opts = ask.get("options") or []
+        if ask.get("kind") == "intent":
+            return {**out, **intent_answer(s, ask, value)}
         if value.isdigit() and 1 <= int(value) <= len(opts):  # "2" on LINE = the second option
             value = opts[int(value) - 1]
         if not value or value.lower() == SKIP:
@@ -406,6 +410,70 @@ def build_grounded_graph(
                    question=f"{s['question']}\n[Assistant asked] {ask.get('question')}\n[User answered] {value}",
                    messages=[HumanMessage(value, id=f"reply-{s.get('run_id')}-{s['budget']['clarify_used']}")])
         return out
+
+    # ------------------------------------------------------------ task type (router) → confirm → route
+    def task_label(t: str | None, lang: str) -> str:
+        return (TASK_LABELS.get(t or "") or {}).get(lang, t or "")
+
+    async def confirm_intent(s: GroundedState) -> dict[str, Any]:
+        """The router was unsure what kind of answer is wanted: ask with the task labels as options (no LLM)."""
+        types = [t for t in s.get("confirm_task") or [] if t in TASK_LABELS]
+        lang = lang_of(s["question"])
+        q = "你是想：" if lang == "zh" else "Did you want:"
+        return {"confirm_task": [], "pending_ask": {
+            "kind": "intent", "question": q, "options": [task_label(t, lang) for t in types], "types": types,
+            "slot": "intent", "assumption": ""}}
+
+    def intent_answer(s: GroundedState, ask: dict, value: str) -> dict[str, Any]:
+        """Option number or label → that type; /skip → the router's pick; free text → the router's reading of the
+        exchange (answer_task_type), and the text is kept as a clarification."""
+        types, opts = ask.get("types") or [], ask.get("options") or []
+        norm = re.sub(r"\W+", "", value).lower()
+        chosen = None
+        if value.isdigit() and 1 <= int(value) <= len(types):
+            chosen = types[int(value) - 1]
+        else:
+            chosen = next((t for t, o in zip(types, opts) if norm and norm == re.sub(r"\W+", "", o).lower()), None)
+        out: dict[str, Any] = {"intent_answered": True}
+        if not chosen and value and value.lower() != SKIP:
+            hint = s.get("answer_task_type")
+            chosen = hint if hint in TASK_LABELS else None
+            out["question"] = f"{s['question']}\n[Assistant asked] {ask.get('question')}\n[User answered] {value}"
+        chosen = chosen or (types[0] if types else s.get("task_type"))
+        clar = [dict(c) for c in s.get("clarifications", [])]
+        if clar:
+            clar[-1]["answer"] = task_label(chosen, lang_of(s["question"])) if chosen else value
+        out.update(task_type=chosen, clarifications=clar)
+        if value and value.lower() != SKIP:
+            out["messages"] = [HumanMessage(value, id=f"reply-{s.get('run_id')}-{s['budget']['clarify_used']}")]
+        return out
+
+    def route_task(s: GroundedState) -> str:
+        return "shop_slots" if s.get("task_type") == "shopping" and shop_on and not s.get("private") else "assess_ambiguity"
+
+    def after_ingest(s: GroundedState) -> str:
+        return "confirm_intent" if s.get("confirm_task") and not s.get("private") else route_task(s)
+
+    def echo_line(s: GroundedState) -> str:
+        """"我理解為：<task label>—「<owner's words>」", from the router's type and the request (no LLM call)."""
+        t = s.get("task_type")
+        if not t or t == "chitchat" or t not in TASK_LABELS:
+            return ""
+        lang = lang_of(s.get("question", ""))
+        said = re.sub(r"\s*\n\s*", " / ", s.get("question", "").split("\n[Assistant asked]")[0]).strip()
+        said = said if len(said) <= 60 else said[:59] + "…"
+        return (f"我理解為：{task_label(t, lang)}—「{said}」" if lang == "zh"
+                else f"My understanding: {task_label(t, lang)} — \"{said}\"")
+
+    def with_echo(s: GroundedState, out: dict[str, Any]) -> dict[str, Any]:
+        line = echo_line(s)
+        ans = out.get("answer")
+        if not line or not ans or str(ans.get("text", "")).startswith(line):
+            return out
+        text = f"{line}\n\n{ans['text']}"
+        msgs = [AIMessage(text, id=m.id) if isinstance(m, AIMessage) and m.content == ans["text"] else m
+                for m in out.get("messages") or []]
+        return {**out, "answer": {**ans, "text": text, "understood": line}, **({"messages": msgs} if msgs else {})}
 
     async def draft(s: GroundedState) -> dict[str, Any]:
         budget = dict(s["budget"])
@@ -1121,12 +1189,10 @@ def build_grounded_graph(
         active = bool(prev.get("slots")) and now_ms() - int(prev.get("at_ms") or 0) < shop_ttl_ms
         if s.get("shopping") and s.get("skip_clarify"):  # owner skipped the question: search with what we have
             return {"budget": budget, "pending_ask": None}
-        if not active and not _SHOP_HINT.search(s["question"]):
-            return {"shopping": False}
         prefs = await shop_prefs()
         sysmsg = (
-            f"{now_line()}\nYou help a shopper in Taiwan (prices in TWD). Decide whether the latest request is about "
-            "choosing or buying a product, and fill the shopping slots. If previous slots are given and the user is "
+            f"{now_line()}\nYou help a shopper in Taiwan (prices in TWD). Fill the shopping slots for the latest "
+            "request. If previous slots are given and the user is "
             "refining (cheaper, another brand, bigger…), action=refine and keep what still applies; a different "
             "product is action=new. item_specific=false when the item is too vague to search a store (\"something "
             "for the kitchen\"). search_terms: 1-2 short Traditional Chinese store-search keywords (product type + key "
@@ -1145,7 +1211,7 @@ def build_grounded_graph(
             "must-avoid features), brand (options: 2-3 well-known brands for this item in Taiwan + 不限). Skip "
             "anything already stated or answered. Each question short, in the user's language, options not repeated "
             "in it; options: up to 4 short plain strings.\n"
-            "Reply with JSON only: {\"shopping\": true|false, \"action\": \"new|refine\", \"item\": \"...\", "
+            "Reply with JSON only: {\"action\": \"new|refine\", \"item\": \"...\", "
             "\"item_specific\": true|false, \"search_terms\": [\"...\"], \"budget_min\": null, \"budget_max\": null, "
             "\"no_budget\": false, \"use_case\": null, \"specs\": {}, \"brand_pref\": null, \"store_pref\": null, "
             "\"must_have\": [], \"avoid\": [], \"remember\": {}, "
@@ -1163,10 +1229,6 @@ def build_grounded_graph(
         d = parse_json(raw) or {}
         if not isinstance(d, dict):
             d = {}
-        if active and prev.get("turn_id") == s.get("turn_id"):
-            d["shopping"] = True  # mid-clarify answers ("要降噪") are not shopping requests on their own
-        if not d.get("shopping"):
-            return {"budget": budget, "shopping": False}
         if not d.get("brand_pref") and _BRANDED.search(s["question"]):
             d["brand_pref"] = "有品牌"
         remember = d.get("remember") if isinstance(d.get("remember"), dict) else {}
@@ -1464,20 +1526,31 @@ def build_grounded_graph(
             return {"check_failures": [f"No valid pick: write one line per pick starting with [n], n from 1 to {len(items)}."]}
         return {"check_failures": []}
 
+    def after_wait_any(after_wait_fn):
+        def pick(s: GroundedState) -> str:
+            if s.get("intent_answered"):
+                return route_task(s)
+            return "shop_slots" if s.get("shopping") else after_wait_fn(s)
+        return pick
+
     def after_shop_slots(s: GroundedState) -> str:
         if s.get("pending_ask"):
             return "ask_user"
         return "shop_search" if s.get("shopping") else "assess_ambiguity"
 
     def add_shopping(g: StateGraph, compose_fn, check_fn, after_wait_fn, wait_targets: list[str]) -> None:
-        """ingest → shop_slots → (ask_user | shop_search | assess_ambiguity); compose/check dispatch on `shopping`."""
+        """ingest → [confirm_intent → ask_user] → by task_type: shop_slots → (ask_user | shop_search) or
+        assess_ambiguity; compose/check dispatch on `shopping` and start the answer with the echo line."""
         async def compose_any(s: GroundedState) -> dict[str, Any]:
-            return await (shop_compose(s) if s.get("shopping") else compose_fn(s))
+            if line := echo_line(s):
+                get_stream_writer()({"echo": line})  # the worker streams it before the answer tokens
+            return with_echo(s, await (shop_compose(s) if s.get("shopping") else compose_fn(s)))
 
         async def check_any(s: GroundedState) -> dict[str, Any]:
-            return await (shop_check(s) if s.get("shopping") else check_fn(s))
+            return with_echo(s, await (shop_check(s) if s.get("shopping") else check_fn(s)))
 
         g.add_node("ingest", ingest)
+        g.add_node("confirm_intent", confirm_intent)
         g.add_node("shop_slots", shop_slots)
         g.add_node("shop_search", shop_search)
         g.add_node("assess_ambiguity", assess_ambiguity)
@@ -1486,11 +1559,12 @@ def build_grounded_graph(
         g.add_node(COMPOSE_NODE, compose_any)
         g.add_node("final_check", check_any)
         g.add_edge(START, "ingest")
-        g.add_edge("ingest", "shop_slots")
+        g.add_conditional_edges("ingest", after_ingest, ["confirm_intent", "shop_slots", "assess_ambiguity"])
+        g.add_edge("confirm_intent", "ask_user")
         g.add_conditional_edges("shop_slots", after_shop_slots, ["ask_user", "shop_search", "assess_ambiguity"])
         g.add_edge("ask_user", "wait_answer")
-        g.add_conditional_edges("wait_answer", lambda s: "shop_slots" if s.get("shopping") else after_wait_fn(s),
-                                ["shop_slots", *wait_targets])
+        g.add_conditional_edges("wait_answer", after_wait_any(after_wait_fn),
+                                list(dict.fromkeys(["shop_slots", "assess_ambiguity", *wait_targets])))
         g.add_edge("shop_search", COMPOSE_NODE)
         g.add_edge(COMPOSE_NODE, "final_check")
         g.add_conditional_edges("final_check", after_check, [COMPOSE_NODE, END])

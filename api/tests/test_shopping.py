@@ -57,10 +57,11 @@ CFG = {"configurable": {"thread_id": "s1"}}
 KNOWN = {"use_case": "自用", "must_have": ["好清洗"], "brand_pref": "不限", "store_pref": "不限"}  # nothing left to ask
 
 
-def inp(text):
+def inp(text, task_type="shopping", **kw):
     from langchain_core.messages import HumanMessage
-    return {"messages": [HumanMessage(text, id="r1")], "run_id": "r1", "thread_id": "s1", "channel": "web",
-            "private": False, "model": "local"}
+    rid = kw.pop("run_id", "r1")
+    return {"messages": [HumanMessage(text, id=rid)], "run_id": rid, "thread_id": "s1", "channel": "web",
+            "private": False, "model": "local", "task_type": task_type, **kw}
 
 
 async def test_asks_budget_then_recommends_only_real_listings(pol):
@@ -110,10 +111,11 @@ def test_relevance_drops_padding_and_bare_modifiers():
     assert kept == ["不鏽鋼電動胡椒研磨器 陶瓷芯", "胡椒研磨罐"]
 
 
-async def test_not_shopping_and_no_pick_retry(pol):
-    g, llm, _ = graph(pol, {"shop_slots": {"shopping": False}, "compose": "Hi."})
-    out = await g.ainvoke(inp("推薦一下 Python 的學習方法"), CFG)
-    assert out["answer"]["text"].startswith("Hi.") and "shop_compose" not in llm.calls
+async def test_router_task_type_decides_shopping_and_no_pick_retry(pol):
+    g, llm, _ = graph(pol, {"compose": "Hi."})
+    out = await g.ainvoke(inp("推薦適合冷凍且富含纖維素的食材", task_type="advice"), CFG)
+    assert out["answer"]["text"] == "我理解為：知識或建議—「推薦適合冷凍且富含纖維素的食材」\n\nHi."
+    assert "shop_slots" not in llm.calls and "shop_compose" not in llm.calls
     g, llm, _ = graph(pol, {"shop_slots": {"shopping": True, "item": "罐", "search_terms": ["罐"], "no_budget": True, **KNOWN},
                             "shop_compose": ["沒有編號", "[3] 好"]})
     out = await g.ainvoke(inp("想買罐子 預算不限"), {"configurable": {"thread_id": "s2"}})
@@ -204,3 +206,30 @@ async def test_private_threads_never_shop(pol):
     g, llm, calls = graph(pol, {"compose": "ok"})
     await g.ainvoke({**inp("推薦調味料罐"), "private": True}, CFG)
     assert not calls and "shop_slots" not in llm.calls
+
+
+FULL = {"item": "油罐", "item_specific": True, "search_terms": ["調味料罐"], "no_budget": True, **KNOWN}
+
+
+@pytest.mark.parametrize("reply,update,shops", [("2", {}, True), ("知識或建議", {}, False),
+                                                ("我只是想知道怎麼挑", {"answer_task_type": "advice"}, False),
+                                                ("/skip", {}, False)])
+async def test_unsure_task_type_is_asked_with_label_options(pol, reply, update, shops):
+    g, llm, _ = graph(pol, {"shop_slots": FULL, "shop_compose": "[1] ok", "compose": "Hi."})
+    out = await g.ainvoke(inp("推薦適合的油罐 預算不限", task_type="advice", confirm_task=["advice", "shopping"]), CFG)
+    ask = out["__interrupt__"][0].value
+    assert (ask["question"], ask["options"]) == ("你是想：", ["知識或建議", "找商品購買"]) and not llm.calls
+    out = await g.ainvoke(Command(resume=reply, update=update), CFG)
+    assert ("shop_slots" in llm.calls) is shops
+    label = "找商品購買" if shops else "知識或建議"
+    assert out["answer"]["text"].startswith(f"我理解為：{label}—「推薦適合的油罐 預算不限」\n\n")
+
+
+async def test_correction_merges_messages_and_drops_shopping_state(pol):
+    g, llm, calls = graph(pol, {"shop_slots": FULL, "shop_compose": "[1] ok", "compose": "Hi."})
+    await g.ainvoke(inp("推薦適合冷凍的食材"), CFG)
+    assert (await g.aget_state(CFG)).values["shop"]
+    out = await g.ainvoke(inp("不是，我是想知道選哪些蔬菜", task_type="advice", run_id="r2",
+                              correction="推薦適合冷凍的食材\n不是，我是想知道選哪些蔬菜"), CFG)
+    assert out["shop"] is None and out["correction"] is None and llm.calls.count("shop_slots") == 1
+    assert out["answer"]["text"].startswith("我理解為：知識或建議—「推薦適合冷凍的食材 / 不是，我是想知道選哪些蔬菜」")

@@ -262,3 +262,21 @@ async def test_help_and_unknown_commands_are_answered_without_a_run(redis, enq):
 async def test_paths_and_overrides_are_not_commands(redis, enq, text):
     res = await pipeline.submit(job(text, key=text), enq)
     assert res.command_reply is None and res.run_id
+
+
+async def test_correction_reroutes_previous_and_current_message_together(redis, enq, monkeypatch):
+    seen: list[str] = []
+
+    async def fake_route(**kw):
+        seen.append(kw["redacted_text"])
+        corr = 0.9 if kw["redacted_text"].startswith("[Previous message]") else 0.0
+        return RouterResult(intent="chat", intent_confidence=0.95, tier="local", source="jev",
+                            task_type="advice", task_probs={"advice": 0.9}, correction=corr)
+
+    monkeypatch.setattr(pipeline, "route", fake_route)
+    await pipeline.submit(job("推薦冷凍食材", key="a"), enq)
+    res = await pipeline.submit(job("不是，我是問蔬菜", key="b"), enq)
+    assert seen[-1] == "推薦冷凍食材\n不是，我是問蔬菜"  # classified again as one request, no route carried over
+    payload = enq.calls[-1]["payload"]
+    assert payload["correction"] == "推薦冷凍食材\n不是，我是問蔬菜" and payload["text"] == "不是，我是問蔬菜"
+    assert any("correction" in r for r in res.decision.reasons)

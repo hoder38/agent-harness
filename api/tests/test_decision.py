@@ -158,3 +158,28 @@ def test_video_goes_background(policy):
 def test_risky_flag(policy):
     assert d(policy, r=rr(risky=0.7)).risky
     assert not d(policy, r=rr(risky=0.3)).risky
+
+
+# 3b. unsure task type → confirm with the owner (only when a pipeline-changing type is in the top 2)
+@pytest.mark.parametrize("probs,want", [
+    ({"advice": 0.55, "shopping": 0.40, "factual": 0.05}, ["advice", "shopping"]),   # top-2 too close
+    ({"shopping": 0.65, "advice": 0.10}, ["shopping", "advice"]),                     # top too low
+    ({"advice": 0.90, "shopping": 0.08}, []),                                         # clear
+    ({"advice": 0.50, "factual": 0.45, "shopping": 0.05}, []),                        # same pipeline either way
+])
+def test_unsure_task_type_is_confirmed(policy, probs, want):
+    top = max(probs, key=probs.get)
+    out = d(policy, r=rr(task_type=top, task_probs=probs))
+    assert out.confirm_task == want and out.task_type == top
+
+
+def test_single_probability_router_confirms_only_its_own_shopping_pick(policy):
+    assert d(policy, r=rr(task_type="shopping", task_probs={"shopping": 0.6})).confirm_task == ["shopping", "advice"]
+    assert d(policy, r=rr(task_type="advice", task_probs={"advice": 0.6})).confirm_task == []
+
+
+def test_task_type_not_confirmed_when_private_resuming_or_coding(policy):
+    r = rr(task_type="advice", task_probs={"advice": 0.5, "shopping": 0.5})
+    assert d(policy, g=g0(private=True), r=r).confirm_task == []
+    assert decide(job(), g0(), r, "FREE", NO_BUDGET, policy, resuming=True).confirm_task == []
+    assert d(policy, r=r.model_copy(update={"intent": "coding"})).confirm_task == []
