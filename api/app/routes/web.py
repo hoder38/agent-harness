@@ -167,6 +167,19 @@ def _serialize(m: Any) -> dict[str, Any] | None:
     return None
 
 
+def _fill_empty_replies(msgs: list[dict[str, Any]]) -> None:
+    """A local model may end a tool run with an empty message; show the last tool result instead of "…"
+    (the live run already does this via _tool_fallback)."""
+    last_tool = ""
+    for m in msgs:
+        if m["role"] == "user":
+            last_tool = ""
+        elif m["role"] == "tool":
+            last_tool = m["content"]
+        elif m["role"] == "assistant" and not m["content"] and not m.get("tool_calls") and last_tool:
+            m["content"] = last_tool
+
+
 @router.get("/threads")
 async def list_threads(owner: str = Depends(require_owner)):
     prefixes = ("web:",)
@@ -203,6 +216,7 @@ async def get_thread(tid: str, request: Request, owner: str = Depends(require_ow
         graph = build_graph(None, [], checkpointer=request.app.state.checkpointer)
     snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
     msgs = [s for m in (snap.values or {}).get("messages", []) if (s := _serialize(m))]
+    _fill_empty_replies(msgs)
     question = None
     if pending and snap.interrupts:
         v = snap.interrupts[0].value or {}
