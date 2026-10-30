@@ -50,6 +50,6 @@ def test_extra_private_pattern():
 
 def test_line_ignores_topic_keywords_but_web_does_not():
     rules = {"private_keywords": ["行程"]}
-    job = job("幫我規劃東京行程", channel="line")
-    assert gate0(job, rules, channel="line").privacy_tag is None
-    assert gate0(job, rules, channel="web").privacy_tag == "PRIVATE"
+    j = job("幫我規劃東京行程", channel="line")
+    assert gate0(j, rules, channel="line").privacy_tag is None
+    assert gate0(j, rules, channel="web").privacy_tag == "PRIVATE"
