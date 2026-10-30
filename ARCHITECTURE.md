@@ -1234,3 +1234,29 @@ re-prioritise remaining phases from real usage and the decision log.
 
 - **Calendar vs todo on LINE (2026-10-30):** local Qwen filed every "add ..." as a todo, worse on long LINE threads (it copies earlier tool calls). Fixes, in order of effect: `tools.narrow_for_intent` (deterministic, no model: add verb + time of day and no todo word → `add_todo` removed; explicit todo/reminder → `add_event` removed); the assistant route hides earlier turns' tool calls and keeps `executor.assistant_history_turns` (8) turns (`graphs.main.drop_old_tool_turns`); the prompt rule. A Jev/cloud classifier was rejected: the text is PRIVATE. LINE gets a content-free notice when a proposal was made.
 - **Claimed-success guard (2026-10-30):** on LINE, Qwen answered "proposal created" after only `get_current_time`. `tools.required_tool` names the write tool a clear request must call (add verb + time of day → `add_event`; 新增待辦 → `add_todo`); `build_graph(require_tool=...)` nudges the model once if it tries to finish without calling it, then replies that the action failed. Private LINE notices (`_private_line_notice`) report what the turn really did.
+
+## Tool-call reliability with the small local model (2026-10-30)
+
+Local Qwen runs the assistant route and PRIVATE content, so it cannot be replaced by a cloud classifier. Its failures
+were all seen live (web and LINE); the fixes are deterministic code around the model, not better prompting alone.
+
+| Failure seen | Layer that handles it | Where |
+|---|---|---|
+| Picks the wrong tool (every "add ..." became `add_todo`, copied from earlier turns) | **Narrow the tool list before the run**: add verb + time of day and no todo word → `add_todo` removed; todo/reminder words → `add_event` removed; ambiguous → both kept | `tools.narrow_for_intent` |
+| Copies tool calls from long history | Assistant route keeps `executor.assistant_history_turns` turns and hides earlier turns' tool calls/results from the model input (checkpoint untouched) | `graphs.main.drop_old_tool_turns` |
+| Says "done" without calling any tool (calendar proposal, todo) | **Required-tool check**: for a clear request `required_tool` names the write tool; if the model tries to finish without it having been called this turn, nudge once ("nothing was saved, call X now"); if still no call, the reply says the action failed | `tools.required_tool`, `build_graph(require_tool=...)` |
+| Wrong or invented arguments (relative dates, "tomorrow+1 day", year 2023) | Tools take words and resolve them in code: `today/tomorrow/day after tomorrow/今天/明天/後天` + HH:MM, `MM/DD`, `MM月DD日`; bad values return "Not added: ..." rather than guessing | `todos.parse_due`, `gcal.when` |
+| Repeats the same call | Duplicate guards: identical todo within 10 min; identical open calendar proposal | `tools/todos.py`, `tools/calendar.py` |
+| Empty final message after a tool result | Reply with the last tool result of the turn | `worker._tool_fallback` |
+| Owner cannot see PRIVATE answers on LINE, so cannot tell what happened | The LINE notice is built from this turn's real tool results (added / proposed / failed / nothing happened) with a link | `worker._private_line_notice` |
+
+**Rule for new tools:** a tool that writes anything (todo, calendar, memory, later email) must (1) resolve user-facing
+values in code, (2) return a one-line result that starts with a stable prefix (`Added`, `Proposed`, `Not added`) so
+those prefixes can drive the checks above, (3) be covered by `narrow_for_intent`/`required_tool` when the request is
+recognisable by cheap rules, and (4) never be reported as done unless its tool result says so. Intent rules are
+regexes in `tools/__init__.py`; keep them conservative (queries such as "what todos do I have" are excluded) and leave
+both tools available when the request is ambiguous.
+
+**Not done / limits:** the rules only cover clear phrasings; an ambiguous message ("新增 買牛奶") can still be filed in
+the wrong place. A general model-based verifier for tool use belongs to phase 10b (L9 verify layer), and must stay
+local for PRIVATE text. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
