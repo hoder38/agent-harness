@@ -10,6 +10,7 @@ Everything here is best effort: a failure to write an inbox row never fails the 
 import json
 import logging
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from . import config, db, state
 from .channels import line
@@ -27,7 +28,8 @@ def cfg() -> dict[str, Any]:
 
 
 def out(row: dict[str, Any]) -> dict[str, Any]:
-    return {**row, "created_at": row["created_at"].isoformat(), "updated_at": row["updated_at"].isoformat()}
+    tz = ZoneInfo("Asia/Taipei")   # the web UI shows the first 16 characters of these strings
+    return {**row, "created_at": row["created_at"].astimezone(tz).isoformat(), "updated_at": row["updated_at"].astimezone(tz).isoformat()}
 
 
 async def add(kind: str, title: str, body: str = "", *, priority: str = "normal", private: bool = False,

@@ -146,3 +146,11 @@ def test_intent_narrowing_picks_calendar_or_todo_without_a_model():
 def test_day_after_tomorrow_is_understood():
     assert (todos.parse_due("day after tomorrow 09:30").date() - datetime.now(todos.TZ).date()).days == 2
     assert (todos.parse_due("後天 09:30").date() - datetime.now(todos.TZ).date()).days == 2
+
+
+def test_api_times_are_taipei_not_utc():
+    from datetime import timezone
+
+    t = datetime(2026, 10, 31, 0, 30, tzinfo=timezone.utc)
+    assert todos.out({"due_at": t, "created_at": t, "updated_at": t})["due_at"] == "2026-10-31T08:30:00+08:00"
+    assert inbox.out({"created_at": t, "updated_at": t})["created_at"] == "2026-10-31T08:30:00+08:00"

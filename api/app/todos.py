@@ -34,7 +34,8 @@ def parse_due(value: str | None) -> datetime | None:
 
 
 def out(row: dict[str, Any]) -> dict[str, Any]:
-    return {**row, **{k: row[k].isoformat() if row.get(k) else None for k in ("due_at", "created_at", "updated_at")}}
+    # Postgres returns UTC; the web UI shows the first 16 characters, so hand it Asia/Taipei times
+    return {**row, **{k: row[k].astimezone(TZ).isoformat() if row.get(k) else None for k in ("due_at", "created_at", "updated_at")}}
 
 
 async def add(title: str, *, notes: str = "", due_at: datetime | None = None, channel: str = "web") -> dict[str, Any]:
