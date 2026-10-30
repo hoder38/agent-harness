@@ -84,6 +84,28 @@ def stub_old_tool_results(messages: list[AnyMessage]) -> list[AnyMessage]:
     return out
 
 
+def drop_old_tool_turns(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Remove tool calls and results of earlier turns from the model input (the current turn is untouched).
+
+    A small local model copies the tool it used in earlier turns (every "add ..." became add_todo), so for the
+    assistant route only the conversation text is kept. The checkpointed thread keeps everything.
+    """
+    human_idx = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
+    if not human_idx:
+        return messages
+    cur = human_idx[-1]
+    out: list[AnyMessage] = []
+    for i, m in enumerate(messages):
+        if i < cur and isinstance(m, ToolMessage):
+            continue
+        if i < cur and isinstance(m, AIMessage) and m.tool_calls:
+            if not str(m.content).strip():
+                continue
+            m = m.model_copy(update={"tool_calls": []})
+        out.append(m)
+    return out
+
+
 def repair_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
     """Answer any tool call that never got a result (tool-less route, cancel, crash).
 
@@ -115,6 +137,7 @@ def build_graph(
     max_turns: int = 20,
     tool_limits: dict[str, int] | None = None,
     checkpointer: Any = None,
+    drop_old_tools: bool = False,
 ):
     bound = llm.bind_tools(tools) if (llm is not None and tools) else llm
     limits = tool_limits or {}
@@ -122,7 +145,9 @@ def build_graph(
     async def agent(state: MessagesState) -> dict[str, Any]:
         if bound is None:
             raise RuntimeError("graph built without a model (read-only)")
-        msgs = [SystemMessage(system), *repair_tool_calls(stub_old_tool_results(trim_history(state["messages"], max_turns)))]
+        hist = trim_history(state["messages"], max_turns)
+        hist = drop_old_tool_turns(hist) if drop_old_tools else stub_old_tool_results(hist)
+        msgs = [SystemMessage(system), *repair_tool_calls(hist)]
         return {"messages": [await bound.ainvoke(msgs)]}
 
     tool_node = ToolNode(tools) if tools else None

@@ -112,3 +112,37 @@ def test_line_gets_a_content_free_notice_when_a_calendar_change_was_proposed():
     assert "Inbox" in _proposal_notice(done)
     assert _proposal_notice(done + [HumanMessage("later")]) is None
     assert _proposal_notice([HumanMessage("x"), ToolMessage("No events", tool_call_id="1")]) is None
+
+
+def test_assistant_history_hides_earlier_tool_calls_but_keeps_the_current_turn():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from app.graphs.main import drop_old_tool_turns
+
+    call = {"name": "add_todo", "args": {}, "id": "1"}
+    msgs = [HumanMessage("加上 A"), AIMessage("", tool_calls=[call]), ToolMessage("Added todo", tool_call_id="1", name="add_todo"),
+            AIMessage("好"), HumanMessage("加上 B"), AIMessage("", tool_calls=[call]), ToolMessage("Added", tool_call_id="1")]
+    out = drop_old_tool_turns(msgs)
+    assert [type(m).__name__ for m in out] == ["HumanMessage", "AIMessage", "HumanMessage", "AIMessage", "ToolMessage"]
+    assert out[1].content == "好" and out[3].tool_calls
+
+
+def test_intent_narrowing_picks_calendar_or_todo_without_a_model():
+    from app.tools import narrow_for_intent
+    from app.tools.todos import TODO_TOOLS
+
+    tools = [*TODO_TOOLS, cal.add_event, cal.list_events]
+
+    def names(text):
+        return {t.name for t in narrow_for_intent(tools, text)}
+
+    assert "add_todo" not in names("加上明天晚上要回桃園吃晚餐") and "add_event" in names("加上明天晚上要回桃園吃晚餐")
+    assert "add_todo" not in names("/local 新增後天早上9點半要到士林捷運站")
+    assert "add_event" not in names("新增待辦 明天早上9點交報告") and "add_todo" in names("提醒我晚上買牛奶")
+    assert {"add_todo", "add_event"} <= names("新增 買牛奶")   # ambiguous: keep both
+    assert narrow_for_intent(TODO_TOOLS, "加上明天晚上吃飯") == TODO_TOOLS   # no calendar connected
+
+
+def test_day_after_tomorrow_is_understood():
+    assert (todos.parse_due("day after tomorrow 09:30").date() - datetime.now(todos.TZ).date()).days == 2
+    assert (todos.parse_due("後天 09:30").date() - datetime.now(todos.TZ).date()).days == 2

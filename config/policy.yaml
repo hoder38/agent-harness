@@ -93,6 +93,7 @@ router:
 
 executor:
   recursion_limit: 90            # 10 clarify rounds x3 + 3 research loops x5 + fixed nodes ~= 55
+  assistant_history_turns: 8     # assistant route: shorter history, earlier tool calls hidden (Qwen copies them)
   max_history_turns: 20          # keep last N user turns in the model context
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry

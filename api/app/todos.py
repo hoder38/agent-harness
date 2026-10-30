@@ -11,8 +11,8 @@ STATUSES = ("open", "done")
 _COLS = "id, title, notes, status, due_at, source_channel, created_at, updated_at"
 
 
-_REL_DAYS = {"today": 0, "tomorrow": 1, "今天": 0, "明天": 1, "後天": 2, "后天": 2}
-_REL = re.compile(r"^(?P<day>today|tomorrow|今天|明天|後天|后天)\s*(?:T|\s)?\s*(?P<time>\d{1,2}:\d{2})?$", re.I)
+_REL_DAYS = {"today": 0, "tomorrow": 1, "day after tomorrow": 2, "今天": 0, "明天": 1, "後天": 2, "后天": 2}
+_REL = re.compile(r"^(?P<day>today|day after tomorrow|tomorrow|今天|明天|後天|后天)\s*(?:T|\s)?\s*(?P<time>\d{1,2}:\d{2})?$", re.I)
 
 
 def parse_due(value: str | None) -> datetime | None:

@@ -1,4 +1,5 @@
 """MVP tools. Every tool declares whether it is risky (approval) — none are in the MVP."""
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -59,4 +60,22 @@ def tools_for(route: str, *, private: bool = False, local: bool = False) -> list
         if get_settings().brave_api_key:
             tools.append(web_search)
         tools.append(fetch_page)
+    return tools
+
+
+_TODO_WORDS = re.compile(r"待辦|代辦|todo|提醒|記得|to-do", re.I)
+_ADD_WORDS = re.compile(r"^\s*(?:/\w+\s+)?(?:幫我|請)?(?:加上|加入|新增|安排|預約|約|add)|開會|會議|行程|約會|預約")
+_SLOT = re.compile(r"\d{1,2}\s*[:點時]|早上|上午|中午|下午|晚上|凌晨|\d\s*(?:am|pm)", re.I)
+
+
+def narrow_for_intent(tools: list, text: str) -> list:
+    """A small local model files every "add ..." as a todo, so decide the obvious cases here, without a model:
+    an add request with a time of day (and no todo word) is a calendar event; an explicit todo/reminder is not."""
+    names = {t.name for t in tools}
+    if "add_event" not in names:
+        return tools
+    if _TODO_WORDS.search(text):
+        return [t for t in tools if t.name != "add_event"]
+    if _ADD_WORDS.search(text) and _SLOT.search(text):
+        return [t for t in tools if t.name != "add_todo"]
     return tools

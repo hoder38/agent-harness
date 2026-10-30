@@ -52,7 +52,7 @@ async def _propose(action: str, title: str, body: str, data: dict[str, Any]) -> 
 @tool
 async def add_event(title: str, start: str, end: str | None = None, notes: str = "") -> str:
     """Propose a new calendar event (needs the owner's approval in the Inbox; it is NOT added immediately).
-    `start`/`end` are YYYY-MM-DDTHH:MM or "today"/"tomorrow" followed by HH:MM (e.g. "tomorrow 15:00"), Asia/Taipei.
+    `start`/`end` are YYYY-MM-DDTHH:MM or "today"/"tomorrow"/"day after tomorrow" followed by HH:MM (e.g. "day after tomorrow 09:30"), Asia/Taipei.
     `end` defaults to one hour after start. Pass relative days as words; do not compute dates yourself."""
     try:
         a = gcal.when(start)
