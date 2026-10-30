@@ -101,3 +101,14 @@ def test_day_range_and_event_line():
     assert (gcal.day_range("tomorrow", 1)[0].date() - datetime.now(todos.TZ).date()).days == 1
     ev = {"id": "e1", "summary": "A  B", "start": {"date": "2026-11-02"}, "end": {"date": "2026-11-03"}}
     assert gcal.line(ev) == "e1 | 2026-11-02 (all day) | A B"
+
+
+def test_line_gets_a_content_free_notice_when_a_calendar_change_was_proposed():
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from app.jobs.worker import _proposal_notice
+
+    done = [HumanMessage("x"), ToolMessage("Proposed (Inbox item #5). The calendar has NOT been changed", tool_call_id="1")]
+    assert "Inbox" in _proposal_notice(done)
+    assert _proposal_notice(done + [HumanMessage("later")]) is None
+    assert _proposal_notice([HumanMessage("x"), ToolMessage("No events", tool_call_id="1")]) is None

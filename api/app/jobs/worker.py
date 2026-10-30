@@ -60,13 +60,14 @@ async def _requeue(ctx: dict[str, Any], payload: dict[str, Any], queue: str, def
     )
 
 
-async def _deliver_line(job: Job, decision: Decision, delivery: dict[str, Any], text: str, pol: dict) -> None:
+async def _deliver_line(job: Job, decision: Decision, delivery: dict[str, Any], text: str, pol: dict,
+                        notice: str | None = None) -> None:
     to = delivery.get("line_user_id")
     if not to:
         return
     ex = pol.get("executor", {})
     if decision.private:
-        text = ex.get("private_line_notice", "🔒 Private answer: open the web app.")
+        text = notice or ex.get("private_line_notice", "🔒 Private answer: open the web app.")
     text = text[: int(ex.get("line_max_chars", 4500))]
     try:
         await line.deliver(to, text, delivery.get("reply_token"), delivery.get("reply_ts"),
@@ -77,6 +78,16 @@ async def _deliver_line(job: Job, decision: Decision, delivery: dict[str, Any], 
 
 def _use_grounded(pol: dict[str, Any]) -> bool:
     return bool((pol.get("grounding") or {}).get("enabled"))
+
+
+def _proposal_notice(messages: list[Any]) -> str | None:
+    """A calendar add/delete this turn only made an Inbox proposal; LINE can say so without any event details."""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage) and _text(m.content).startswith("Proposed (Inbox item"):
+            return "📥 行事曆變更已提出,請到 Inbox 按核准後才會生效(內容不經 LINE)。"
+    return None
 
 
 def _tool_fallback(messages: list[Any]) -> str:
@@ -356,7 +367,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     elif decision.route == "clarify" and final:
         await state.set_clarify_question(r, job.thread_id, final[:1000])
     if job.channel == "line":
-        await _deliver_line(job, decision, delivery, final, pol)
+        await _deliver_line(job, decision, delivery, final, pol, _proposal_notice(vals.get("messages", [])))
     if not coding and ctx.get("redis") is not None:
         try:
             await memory_jobs.after_turn(ctx["redis"], run_id=run_id, thread_id=job.thread_id,
