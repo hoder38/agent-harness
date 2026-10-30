@@ -97,6 +97,7 @@ executor:
   max_history_turns: 20          # keep last N user turns in the model context
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry
+  web_base_url: "https://www.anomopi.com"   # links in PRIVATE LINE notices (/Todos, /Inbox)
   private_line_notice: "🔒 The answer contains private data. Open the web app to read it."
 
 queues:

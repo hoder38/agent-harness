@@ -103,15 +103,21 @@ def test_day_range_and_event_line():
     assert gcal.line(ev) == "e1 | 2026-11-02 (all day) | A B"
 
 
-def test_line_gets_a_content_free_notice_when_a_calendar_change_was_proposed():
+def test_private_line_notice_says_what_really_happened_and_where_to_look():
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from app.jobs.worker import _proposal_notice
+    from app.jobs.worker import _private_line_notice as n
 
-    done = [HumanMessage("x"), ToolMessage("Proposed (Inbox item #5). The calendar has NOT been changed", tool_call_id="1")]
-    assert "Inbox" in _proposal_notice(done)
-    assert _proposal_notice(done + [HumanMessage("later")]) is None
-    assert _proposal_notice([HumanMessage("x"), ToolMessage("No events", tool_call_id="1")]) is None
+    def tool(name, text):
+        return ToolMessage(text, tool_call_id="1", name=name)
+
+    base = "https://x.test"
+    assert "Inbox" in n([HumanMessage("x"), tool("add_event", "Proposed (Inbox item #5). NOT")], base)
+    assert "https://x.test/Inbox" in n([HumanMessage("x"), tool("add_event", "Proposed (Inbox item #5).")], base)
+    assert "已新增待辦" in n([HumanMessage("x"), tool("add_todo", "Added todo #1: a")], base)
+    assert "沒有新增" in n([HumanMessage("x"), tool("add_todo", "Not added: bad")], base)
+    assert "沒有新增或修改" in n([HumanMessage("x")], base)   # the model only talked: say nothing was saved
+    assert "已新增待辦" not in n([tool("add_todo", "Added todo #1: a"), HumanMessage("later")], base)   # earlier turn
 
 
 def test_assistant_history_hides_earlier_tool_calls_but_keeps_the_current_turn():

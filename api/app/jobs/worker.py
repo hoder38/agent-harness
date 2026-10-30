@@ -80,14 +80,36 @@ def _use_grounded(pol: dict[str, Any]) -> bool:
     return bool((pol.get("grounding") or {}).get("enabled"))
 
 
-def _proposal_notice(messages: list[Any]) -> str | None:
-    """A calendar add/delete this turn only made an Inbox proposal; LINE can say so without any event details."""
+def _private_line_notice(messages: list[Any], base: str) -> str:
+    """What a PRIVATE LINE turn actually did, from this turn's tool results, with no content and a link to look.
+
+    The owner cannot see the answer on LINE, so the notice says whether a todo or calendar change really happened."""
+    def link(page: str) -> str:
+        return f"\n{base.rstrip('/')}/{page}" if base else ""
+
+    lines: list[str] = []
     for m in reversed(messages):
         if isinstance(m, HumanMessage):
             break
-        if isinstance(m, ToolMessage) and _text(m.content).startswith("Proposed (Inbox item"):
-            return "📥 行事曆變更已提出,請到 Inbox 按核准後才會生效(內容不經 LINE)。"
-    return None
+        if not isinstance(m, ToolMessage):
+            continue
+        t, name = _text(m.content), m.name or ""
+        if name == "add_todo":
+            lines.append("✅ 已新增待辦" + link("Todos") if t.startswith("Added todo") else
+                         "ℹ️ 這筆待辦先前已新增" + link("Todos") if t.startswith("Already added") else
+                         "⚠️ 待辦沒有新增,請用明確的日期或時間重傳")
+        elif name == "complete_todo":
+            lines.append("✅ 已完成待辦" + link("Todos") if t.startswith("Done") else "⚠️ 找不到該待辦")
+        elif name in ("add_event", "delete_event"):
+            lines.append("📥 行事曆變更已提出,但尚未生效,請到 Inbox 按核准" + link("Inbox") if t.startswith("Proposed") or t.startswith("Already waiting")
+                         else "⚠️ 行事曆變更沒有提出,請補上明確的時間(例如 明天 15:00)後重傳")
+        elif name == "list_events":
+            lines.append("🔒 已查詢行事曆,內容為私人,請到網頁查看")
+        elif name == "list_todos":
+            lines.append("🔒 已查詢待辦,內容為私人" + link("Todos"))
+    if not lines:
+        return "🔒 回覆含私人內容,不經 LINE。這次沒有新增或修改待辦、行事曆。" + (f"\n請到網頁查看:{base.rstrip('/')}" if base else "")
+    return "\n".join(dict.fromkeys(reversed(lines)))
 
 
 def _tool_fallback(messages: list[Any]) -> str:
@@ -369,7 +391,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     elif decision.route == "clarify" and final:
         await state.set_clarify_question(r, job.thread_id, final[:1000])
     if job.channel == "line":
-        await _deliver_line(job, decision, delivery, final, pol, _proposal_notice(vals.get("messages", [])))
+        await _deliver_line(job, decision, delivery, final, pol, _private_line_notice(vals.get("messages", []), (pol.get("executor") or {}).get("web_base_url", "")))
     if not coding and ctx.get("redis") is not None:
         try:
             await memory_jobs.after_turn(ctx["redis"], run_id=run_id, thread_id=job.thread_id,
