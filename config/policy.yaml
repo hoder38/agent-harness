@@ -103,6 +103,7 @@ queues:
   background: { name: "arq:background", timeout_s: 3600 }   # coding: Copilot + tests + 1 retry
   coding: { name: "arq:background", timeout_s: 3600 }       # phase 5 coding graph (§9a); same worker as background
   media: { name: "arq:background", timeout_s: 1800 }
+  ingest: { name: "arq:background", timeout_s: 1800 }       # phase 6 Copilot session ingest (§9b)
 
 heavy_media_kinds: [video, large_doc]
 defer_recheck_s: 300
@@ -161,3 +162,18 @@ memory:                      # phase 10 (§10): app/memory.py, LangGraph Postgre
   extract_context_min_score: 0.3
   episode_idle_s: 1800       # a thread idle this long with new turns gets an episode summary
   episode_ttl_days: 180      # episodes expire unless pinned
+
+copilot_ingest:              # phase 6 (§9b/§9c): app/copilot_ingest.py, app/jobs/copilot_jobs.py, app/mcp_server.py
+  enabled: true
+  debounce_s: 60             # agentStop hooks within this window share one ingest job (it reads the whole file)
+  reconcile_idle_s: 1800     # nightly reconciler: sessions idle this long with no recorded sessionEnd are ingested
+  reconcile_days: 3          # ...but only sessions modified within this many days
+  min_turns: 1               # sessions with fewer owner prompts are skipped
+  extract_facts: true        # on session end, run the profile/procedure extractor over the owner's prompts
+  mcp_recall_k: 6
+
+inbox:                       # phase 7 (§12 L10): app/inbox.py; todos need no config (app/todos.py)
+  enabled: true
+  memory_items: true         # every automatic/agent memory write appears as a low-priority item
+  keep_done_days: 30         # answered/dismissed items are deleted after this
+  keep_low_days: 14          # unread low-priority items (memory writes) are deleted after this

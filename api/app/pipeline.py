@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from . import config, db, memory, state
+from . import config, db, inbox, memory, state
 from .decision import decide
 from .gates.gate0 import gate0
 from .gates.gate1_qwen import gate1
@@ -168,6 +168,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     if corrected:
         decision.reasons.append(f"correction {router.correction:.2f} > {corr_th}: re-routed previous + current message")
     if pending:
+        await inbox.resolve_run(pending["run_id"], "done")
         # Answer to the grounded graph's question: keep the exchange for the next round's routing;
         # the worker clears it when the turn is done.
         await state.clear_pending(r, job.thread_id)

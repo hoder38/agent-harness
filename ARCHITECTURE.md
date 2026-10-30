@@ -403,6 +403,15 @@ Ingest worker (mounts `/home/hoder/.copilot/session-state:/copilot-sessions:ro`)
 4. Write: LangGraph thread `copilot:<sessionId>`; `PostgresStore` namespace `("me","coding_episodes")` with embedding; extracted facts → `("me","profile")`.
 5. Nightly reconciler cron ingests sessions with no recorded `sessionEnd`.
 
+### Implemented 2026-10-30 (phase 6) — hooks, ingest job, `harness-memory` MCP
+- **Hooks:** `host/copilot-hooks/harness.{json,sh}`, installed by `host/install-copilot.sh`. The script adds the hook name as `event` to the payload and posts to `POST /ingest/copilot` (`app/routes/ingest.py`, harness token); it always exits 0.
+- **Debounce:** `agentStop` fires after every agent turn, so those share one job deferred by `copilot_ingest.debounce_s` (60 s; the job re-reads the whole file). `sessionEnd` queues immediately and records `ended` in Redis.
+- **Job** `ingest_copilot` (`app/jobs/copilot_jobs.py`, queue `ingest`, same worker as `background`): parse → redact → summarise with the local model (waits while GAMING or kill switch `all`) → write. Skipped when `last_event_id` is unchanged. The profile/procedure extractor runs once, on session end, over the owner's prompts only.
+- **Writes:** thread `copilot:<sessionId>` (redacted prompts and final answers, in the LangGraph checkpointer, not listed in the web thread list); `coding_episodes/<sessionId>` (summary + repo, files, commits, PRs); extracted facts in `profile`/`procedures`. Every ingest is audit-logged (kind `memory`, keys only).
+- **Reconciler:** `reconcile_cron` at 03:30 queues sessions idle ≥ `reconcile_idle_s` and modified within `reconcile_days` that have no recorded `sessionEnd`.
+- **MCP:** `app/mcp_server.py`, streamable HTTP at `http://127.0.0.1:8100/mcp`, harness token required, anything else on that mount is 404. Tools: `recall`, `remember`, `get_thread_summary`. Copilot is a cloud model, so PRIVATE memories are never returned. Also `list_todos`/`add_todo` (phase 7).
+- **Not verified live:** the hook payload field names follow the GitHub hooks reference (`sessionId`, `cwd`, `reason`); run one real SSH session after `host/install-copilot.sh` and check `docker compose logs agent-worker-bg`.
+
 ### 9c. Harness memory → SSH Copilot (recall)
 Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and register it in host Copilot CLI MCP config. Tools: `recall(query)`, `remember(fact)`, `list_todos()`, `add_todo(title, due?)`, `get_thread_summary(thread_id)`.
 
@@ -462,7 +471,7 @@ Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and
   - Private threads get KB and memories but no web.
   - ReAct chat/assistant also get the `search_knowledge`, `recall_memory` and `remember` tools.
 - Coding runs neither recall nor extract.
-- Not yet: "every agent memory write is visible in the Inbox" (§19). The Inbox is phase 7. Every write (`/remember`, tool, extraction, UI edit/delete) is audit-logged (kind `memory`, keys only) and visible on the Memory page.
+- Agent/extraction/Copilot/MCP memory writes also appear as low-priority Inbox items (phase 7); owner-explicit `/remember` and Memory-page edits do not. Every write (`/remember`, tool, extraction, UI edit/delete) is audit-logged (kind `memory`, keys only) and visible on the Memory page.
 
 ## 10a. Knowledge bank — local Obsidian vault
 
@@ -1068,8 +1077,8 @@ re-prioritise remaining phases from real usage and the decision log.
 | 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
 | 4 | gpu-governor + Ollama unload — **implemented 2026-10-28** (§11; live GAMING test with `steam-headless` pending) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
 | 5 | Coding route: sandbox-manager + Copilot (headless, not ACP) + verify + approval — **implemented 2026-10-28** (§9a; verified end-to-end, squid gate passed) | Task produces diff, harness-run tests pass, push blocked until approved (nothing is ever pushed; approval creates a local branch) |
-| 6 | Copilot ingest hooks + harness-memory MCP | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
-| 7 | Todos + Inbox + background approvals | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
+| 6 | Copilot ingest hooks + harness-memory MCP — **implemented 2026-10-30** (§9b; not yet run against a live SSH session) | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
+| 7 | Todos + Inbox + background approvals ✅ | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
 | 8 | LINE channel + **health alerts** | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
 | 8a | Grounded answering (§12a): clarify interrupt/resume (web + LINE), claim extraction, authority tiers, per-turn caps — **implemented 2026-10-28** (web verified live; LINE resume not yet tested live) | §12a test table passes; ambiguous question asks before answering; every factual claim has one T1 citation or an "Unverified" label; caps never exceeded |
 | 8b-read | Browser rendering fallback (§12b stage 1) — **implemented 2026-10-28** | JS-only page returns text via `browser`; private/loopback/metadata URLs blocked by squid; normal pages not rendered |
@@ -1175,7 +1184,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Page listing `PostgresStore` items by namespace with search, edit, delete, and "pin".
 - Episodes expire after a configurable TTL (default 180 days) unless pinned.
 - Conflicting facts: newest wins, previous kept as history; UI shows history.
-- Every agent memory write is visible in the Inbox as a low-priority item. (Implemented 2026-10-29 as nodeReact `/Memory`: memories plus a knowledge-base tab; Inbox items wait for phase 7.)
+- Every agent memory write is visible in the Inbox as a low-priority item. (Implemented 2026-10-29 as nodeReact `/Memory`: memories plus a knowledge-base tab; Inbox items: phase 7.)
 
 ### Health checks & LINE alerts
 - Compose `healthcheck` on every service; `alert-watcher` job (agent-scheduler, every minute) checks: unhealthy containers, queue age > threshold, jobs stuck > timeout, LiteLLM spend > 80%, backup failure, disk/ZFS pool > 85% or not ONLINE, gpu-governor heartbeat missing.
@@ -1184,3 +1193,18 @@ re-prioritise remaining phases from real usage and the decision log.
 ### Egress allowlist (`config/egress-allowlist.yaml`)
 - Allowed: TypeSafe API, OpenAI, Anthropic, LINE API/content, GitHub (api, github.com, Copilot endpoints — VERIFY list), package registries (npm, PyPI) for sandboxes, Hugging Face (model downloads, can be disabled after setup), Ollama registry.
 - Everything else denied and logged; denials appear in Phoenix/alerts.
+
+
+## Implemented 2026-10-30 (phase 7: Todos + Inbox)
+
+- **Todos:** table `todos` (`app/todos.py`). REST `/api/agent/todos` (GET `?status=open|done|all`, POST, PUT, DELETE); agent tools `list_todos`/`add_todo`/`complete_todo` (assistant route only, no delete); MCP `list_todos`/`add_todo`. Due dates are Asia/Taipei; a bare date means 23:59. No reminders yet.
+- **Inbox:** table `inbox` (`app/inbox.py`), kinds `approval|question|alert|memory`. REST `/api/agent/inbox` (list+counts, `/count`, `/{id}/read`, `/{id}/dismiss`, bulk `/dismiss` for alert|memory only, `/{id}/answer`).
+- **Approvals days later:** coding approvals and background questions create an item (LINE push unless it came from LINE; private threads get a generic text). The LangGraph checkpoint lives in Postgres; if the Redis pending marker expired, `answer` restores it and resumes. It refuses (409) if the thread has moved on. Dismissing an approval = reject (sandbox discarded).
+- Alerts and memory writes feed the Inbox; `inbox_cleanup_cron` (04:00) deletes old done/low items (`inbox:` in policy.yaml).
+- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: verify-escalation → Inbox, todo reminders.
+
+### nodeReact tooling notes (found during phase 7)
+
+- **Run everything on Node 14:** build, tests and commands for nodeReact go in a Node 14 container (`node:14-bullseye-slim`, git installed, `npm ci --legacy-peer-deps`), never on the host's Node 22 (see `nodeReact/AGENTS.md`).
+- **Front-end tests pass on Node 14 as-is:** `npx jest --config jest.front.cjs --forceExit src/front` gives 18 suites / 1331 tests with the original lockfile. The `@babel/core@7.12.10` failure only happened on host Node 22, so no babel upgrade is needed (an upgrade would rewrite the lockfile to v3 and break plain `npm ci`).
+- **Release build works on Node 14** (`npm run build`, emits `release.js`, checked with the phase 7 pages). The host Node 22 failures (chunk conflict, OpenSSL) are a host-toolchain problem.

@@ -67,6 +67,37 @@ CREATE TABLE IF NOT EXISTS alerts (
     message         TEXT NOT NULL,
     delivered       BOOLEAN DEFAULT false
 );
+
+CREATE TABLE IF NOT EXISTS todos (
+    id              BIGSERIAL PRIMARY KEY,
+    title           TEXT NOT NULL,
+    notes           TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+    due_at          TIMESTAMPTZ,
+    source_channel  TEXT NOT NULL DEFAULT 'web',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS todos_status_due ON todos (status, due_at);
+
+CREATE TABLE IF NOT EXISTS inbox (
+    id              BIGSERIAL PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind            TEXT NOT NULL,                       -- approval | question | alert | memory
+    priority        TEXT NOT NULL DEFAULT 'normal',      -- high | normal | low
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'open',        -- open | done | dismissed
+    read            BOOLEAN NOT NULL DEFAULT false,
+    private         BOOLEAN NOT NULL DEFAULT false,
+    run_id          TEXT,
+    thread_id       TEXT,
+    detail          JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS inbox_status_created ON inbox (status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS inbox_open_run ON inbox (run_id)
+    WHERE status = 'open' AND kind IN ('approval', 'question');
 """
 
 

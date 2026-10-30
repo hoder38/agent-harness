@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .. import config, db, state
+from .. import config, db, inbox, state
 from ..channels import line
 from ..settings import get_settings
 
@@ -29,6 +29,7 @@ async def send_alert(key: str, message: str, *, dedupe_s: int | None = None) -> 
             log.exception("LINE alert push failed")
     log.warning("ALERT %s: %s", key, message)
     await db.log_alert(key, message, delivered)
+    await inbox.add("alert", message, priority="normal", detail={"key": key, "line": delivered})
     return True
 
 

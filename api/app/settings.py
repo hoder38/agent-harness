@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING; RAG embeddings
     reranker_url: str = ""                             # §10 CPU cross-encoder; empty = RRF order only
     docs_root: str = "/docs"                           # §10 read-only docs folder indexed for RAG
+    copilot_sessions_dir: str = "/copilot-sessions"    # §9b host ~/.copilot/session-state, read-only
     compose_project: str = "agent-harness"
 
     policy_path: str = "/config/policy.yaml"

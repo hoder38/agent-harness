@@ -28,7 +28,7 @@ async def redis():
 @pytest.fixture(autouse=True)
 def no_db(monkeypatch):
     """Postgres writes are fire-and-forget logging; record them instead."""
-    from app import db
+    from app import db, inbox
 
     calls: list[tuple[str, dict]] = []
 
@@ -40,6 +40,12 @@ def no_db(monkeypatch):
     monkeypatch.setattr(db, "log_usage", lambda *a: rec("usage", args=a))
     monkeypatch.setattr(db, "audit", lambda kind, name, detail, run_id=None: rec("audit", kind=kind, name=name))
     monkeypatch.setattr(db, "log_alert", lambda key, message, delivered: rec("alert", key=key))
+
+    async def noop(*a, **kw):
+        return None
+
+    for name in ("add", "resolve_run", "notify_question", "memory_written"):
+        monkeypatch.setattr(inbox, name, noop)
     return calls
 
 

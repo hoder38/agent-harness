@@ -19,16 +19,21 @@ def get_current_time(timezone: str = "Asia/Taipei") -> str:
 
 ROUTE_TOOLS = {
     "chat": [get_current_time],
-    "assistant": [get_current_time],   # + knowledge/memory tools (phase 10) below; todos arrive in phase 7
+    "assistant": [get_current_time],   # + knowledge/memory (phase 10) and todo (phase 7) tools below
     "clarify": [],
     "coding": [],
 }
 WEB_ROUTES = {"chat", "assistant"}
 KB_ROUTES = {"chat", "assistant"}
+TODO_ROUTES = {"assistant"}
 
 
 def tools_for(route: str, *, private: bool = False) -> list:
     tools = list(ROUTE_TOOLS.get(route, []))
+    if route in TODO_ROUTES:
+        from .todos import TODO_TOOLS
+
+        tools += TODO_TOOLS
     if route in KB_ROUTES:  # local services only: PRIVATE threads get them too
         from .. import config
         from .knowledge import kb_tools

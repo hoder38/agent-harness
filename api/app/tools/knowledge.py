@@ -2,7 +2,7 @@
 whether private documents/memories are visible and how new memories are tagged."""
 from langchain_core.tools import tool
 
-from .. import db, memory
+from .. import db, inbox, memory
 from ..rag import store
 
 
@@ -27,6 +27,7 @@ def kb_tools(*, private: bool) -> list:
         ns = kind if kind in memory.EXTRACT_NAMESPACES else "profile"
         key = await memory.remember(ns, text, private=private, kind="tool")
         await db.audit("memory", "tool", {"namespace": ns, "key": key, "private": private})
+        await inbox.memory_written("add", ns, key, text, private=private, source="tool")
         return f"Remembered ({ns})."
 
     return [search_knowledge, recall_memory, remember]

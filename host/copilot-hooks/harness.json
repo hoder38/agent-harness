@@ -1,0 +1,4 @@
+{ "version": 1, "hooks": {
+  "agentStop":  [{ "type": "command", "bash": "~/.copilot/hooks/harness.sh agentStop", "timeoutSec": 5 }],
+  "sessionEnd": [{ "type": "command", "bash": "~/.copilot/hooks/harness.sh sessionEnd", "timeoutSec": 5 }]
+}}

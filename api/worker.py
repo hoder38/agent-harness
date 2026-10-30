@@ -3,7 +3,7 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from app.config import load_yaml
-from app.jobs import alerts, memory_jobs
+from app.jobs import alerts, copilot_jobs, memory_jobs
 from app.jobs.worker import run_agent, shutdown, startup
 from app.settings import get_settings
 
@@ -41,7 +41,8 @@ class Settings:
 class BackgroundSettings:
     """Background / coding / media queue. (arq ignores inherited attributes, so list them all.)"""
     redis_settings = _redis
-    functions = [run_agent, memory_jobs.extract_memory, memory_jobs.summarize_episode, memory_jobs.index_docs_job]
+    functions = [run_agent, memory_jobs.extract_memory, memory_jobs.summarize_episode, memory_jobs.index_docs_job,
+                 copilot_jobs.ingest_copilot]
     on_startup = startup
     on_shutdown = shutdown
     max_tries = 3
@@ -63,6 +64,8 @@ class CronSettings:
         cron(alerts.resume_deferred, second={10, 30, 50}, unique=True, timeout=15),
         cron(memory_jobs.index_docs_cron, second={20}, unique=True, timeout=1800),
         cron(memory_jobs.episodes_cron, minute=set(range(0, 60, 5)), second={40}, unique=True, timeout=30),
+        cron(copilot_jobs.reconcile_cron, hour={3}, minute={30}, second={0}, unique=True, timeout=60),
+        cron(memory_jobs.inbox_cleanup_cron, hour={4}, minute={0}, second={0}, unique=True, timeout=60),
         cron(memory_jobs.sweep_memory_ttl, minute={7}, second={0}, unique=True, timeout=300),
     ]
     on_startup = _cron_startup

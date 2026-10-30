@@ -3,6 +3,7 @@ name: agent-harness
 # MVP = phases 1, 2, 3 + 8; + phase 4 gpu-governor, 8a grounded answering, 8b-read browser (ARCHITECTURE.md §15).
 # + phase 5 coding route: sandbox-manager, socket-proxy-rw, sandbox image (§9a).
 # + phase 10 RAG + memory: reranker (CPU cross-encoder), docs folder mounted read-only at /docs (§10).
+# + phase 6 Copilot ingest + harness-memory MCP: host Copilot session-state mounted read-only at /copilot-sessions (§9b/§9c).
 # Later phases add media-worker and syncthing.
 
 x-proxy-env: &proxy-env
@@ -43,7 +44,10 @@ x-app: &app
   build: { context: ./api, target: runtime }
   image: agent-harness-api:latest
   environment: *app-env
-  volumes: ["./config:/config:ro", "${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro"]
+  volumes:
+    - ./config:/config:ro
+    - ${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro
+    - ${COPILOT_SESSIONS_DIR:-/home/hoder/.copilot/session-state}:/copilot-sessions:ro   # phase 6 ingest (§9b)
   restart: unless-stopped
   networks: [agent]
   depends_on:

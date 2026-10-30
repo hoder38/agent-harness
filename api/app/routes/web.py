@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from .. import config, db, pipeline, state
+from .. import config, db, inbox, pipeline, state
 from ..auth import require_owner
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import build_grounded_graph
@@ -115,6 +115,7 @@ async def cancel_run(run_id: str, request: Request, owner: str = Depends(require
         except Exception:
             pass
         await state.emit(r, run_id, "cancelled", {"reason": "user (queued)"})
+    await inbox.resolve_run(run_id, "dismissed")
     await db.audit("command", "cancel", {}, run_id)
     return {"ok": True}
 
@@ -123,9 +124,21 @@ class ResumeRequest(BaseModel):
     value: str | None = Field(default=None, max_length=100_000)  # None/empty = /skip (answer with an assumption)
 
 
+async def submit_answer(request: Request, owner: str, run_id: str, thread_id: str, pending: dict[str, Any],
+                        value: str | None):
+    """Answer a run's open question (also used by the Inbox); empty = /skip."""
+    value = (value or "").strip()
+    job = Job(channel="web", mode="interactive", user_id=owner, thread_id=thread_id, text=value or "/skip",
+              dedupe_key=f"resume:{run_id}:{pending.get('round')}")
+    res = await pipeline.submit(job, request.app.state.enqueue)
+    if res.duplicate:
+        raise HTTPException(409, "duplicate request")
+    return res
+
+
 @router.post("/runs/{run_id}/resume")
 async def resume_run(run_id: str, body: ResumeRequest, request: Request, owner: str = Depends(require_owner)):
-    """Answer the grounded graph's clarifying question (§12a). Approvals arrive with phase 7."""
+    """Answer the open question of a run: a grounded clarify (§12a) or a coding approval (§9a)."""
     r = state.get_redis()
     meta = await state.get_run_meta(r, run_id)
     if not meta:
@@ -134,12 +147,7 @@ async def resume_run(run_id: str, body: ResumeRequest, request: Request, owner: 
     pending = await state.get_pending(r, thread_id)
     if not pending or pending.get("run_id") != run_id:
         raise HTTPException(409, "this run is not waiting for an answer")
-    value = (body.value or "").strip()
-    job = Job(channel="web", mode="interactive", user_id=owner, thread_id=thread_id, text=value or "/skip",
-              dedupe_key=f"resume:{run_id}:{pending.get('round')}")
-    res = await pipeline.submit(job, request.app.state.enqueue)
-    if res.duplicate:
-        raise HTTPException(409, "duplicate request")
+    res = await submit_answer(request, owner, run_id, thread_id, pending, body.value)
     if res.command_reply:
         return JSONResponse({"command_reply": res.command_reply})
     if "text/event-stream" in request.headers.get("accept", ""):

@@ -118,6 +118,17 @@ docker compose exec -T agent-worker-bg python -m app.tools.rag_eval --both -v  #
 
 The eval cases in `config/rag_eval.yaml` expect `agent-harness/ARCHITECTURE.md` and `README.md` under the docs folder. Copy them with `mkdir -p ~/agent-docs/agent-harness && cp ARCHITECTURE.md README.md ~/agent-docs/agent-harness/`.
 
+## Copilot SSH sessions ↔ memory (phase 6, ARCHITECTURE.md §9b/§9c)
+
+```bash
+host/install-copilot.sh     # hooks in ~/.copilot/hooks + harness-memory MCP in ~/.copilot/mcp-config.json; restart Copilot CLI
+docker compose up -d --build
+```
+
+- After each agent turn (debounced) and at session end, the host session is summarised by the local model into `coding_episodes` (thread `copilot:<id>`). A nightly job picks up sessions that never sent `sessionEnd`.
+- Inside Copilot, the `harness-memory` MCP tools are `recall`, `remember` and `get_thread_summary`. PRIVATE memories are never returned.
+- Config: `copilot_ingest` in `config/policy.yaml`; the session folder is `COPILOT_SESSIONS_DIR` in `.env`.
+
 ## nodeReact integration (deployed in /home/hoder/nodeReact)
 
 - `config/nginx-release.conf`: `/api/agent/` and `/line/webhook` proxy to `agent-api:8000` (network `anomopi_default`).

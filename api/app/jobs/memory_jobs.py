@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from .. import config, db, memory, state
+from .. import config, db, inbox, memory, state
 from ..llm.client import make_llm
 from ..rag import indexer
 
@@ -67,6 +67,9 @@ async def extract_memory(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[s
         log.info("memory ops for %s: %s", payload["run_id"], brief)
         await db.audit("memory", "extract", {"ops": brief, "private": bool(payload.get("private"))},
                        run_id=payload["run_id"])
+        for o in ops:
+            await inbox.memory_written(o["op"], o["namespace"], o["key"], o.get("text", ""),
+                                       private=bool(payload.get("private")), source="extraction")
     return {"status": "done", "ops": brief if ops else []}
 
 
@@ -125,3 +128,8 @@ async def episodes_cron(ctx: dict[str, Any]) -> None:
 async def sweep_memory_ttl(ctx: dict[str, Any]) -> None:
     if (n := await memory.get_store().sweep_ttl()):
         log.info("memory TTL sweep removed %s items", n)
+
+
+async def inbox_cleanup_cron(ctx: dict[str, Any]) -> None:
+    if n := await inbox.cleanup():
+        log.info("inbox cleanup removed %s items", n)

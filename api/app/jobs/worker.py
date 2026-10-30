@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
-from .. import config, db, state
+from .. import config, db, inbox, state
 from ..channels import line
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import SKIP, build_grounded_graph
@@ -301,6 +301,10 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                else int(g_cfg.get("pending_ttl_s", 86400)))
         await state.set_pending(r, job.thread_id, run_id=run_id, round_=int(q.get("round") or 1), ttl_s=ttl,
                                 kind="coding" if coding else "grounded")
+        await inbox.notify_question(
+            run_id=run_id, thread_id=job.thread_id, channel=job.channel, q=q, round_=int(q.get("round") or 1),
+            ttl_s=ttl, private=await state.is_thread_private(r, job.thread_id), coding=bool(coding),
+            background=job.mode == "background", repo=(vals.get("coding") or {}).get("repo"))
         if not coding:
             await state.clarify_ctx_from_question(r, job.thread_id, str(q.get("question") or "")[:1000],
                                                   int((pol.get("clarify") or {}).get("context_ttl_s", 86400)))
