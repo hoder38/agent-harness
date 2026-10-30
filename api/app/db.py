@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS todos (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS reminders_sent SMALLINT NOT NULL DEFAULT 0;   -- 0 none, 1 before due, 2 overdue
 CREATE INDEX IF NOT EXISTS todos_status_due ON todos (status, due_at);
 
 CREATE TABLE IF NOT EXISTS inbox (

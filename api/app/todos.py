@@ -1,5 +1,5 @@
 """Todos (§10): one table used by the web UI (REST), agent tools and Copilot (MCP)."""
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -71,9 +71,11 @@ async def update(todo_id: int, *, title: str | None = None, notes: str | None = 
             raise ValueError(f"status must be one of {STATUSES}")
         sets.append("status = %s"); args.append(status)
     if clear_due:
-        sets.append("due_at = NULL")
+        sets.append("due_at = NULL"); sets.append("reminders_sent = 0")
     elif due_at is not None:
-        sets.append("due_at = %s"); args.append(due_at)
+        sets.append("due_at = %s"); args.append(due_at); sets.append("reminders_sent = 0")
+    if status == "open":
+        sets.append("reminders_sent = 0")
     if not sets:
         return await get(todo_id)
     async with db.get_pool().connection() as conn:
@@ -93,3 +95,40 @@ def line(t: dict[str, Any]) -> str:
     due = f" (due {t['due_at'].astimezone(TZ).strftime('%Y-%m-%d %H:%M')})" if t.get("due_at") else ""
     mark = "x" if t["status"] == "done" else " "
     return f"[{mark}] #{t['id']} {t['title']}{due}"
+
+
+# ---- due reminders (cron in jobs/todo_jobs.py) ----
+def in_quiet_hours(now: datetime, quiet: dict[str, Any]) -> bool:
+    """Quiet window (local hours [start, end)), by default only Mon-Fri."""
+    local = now.astimezone(TZ)
+    if quiet.get("weekdays_only", True) and local.weekday() >= 5:
+        return False
+    return int(quiet.get("start_hour", 0)) <= local.hour < int(quiet.get("end_hour", 7))
+
+
+def reminder_stage(t: dict[str, Any], now: datetime, before_s: int, overdue_s: int) -> int:
+    """1 = due soon, 2 = overdue, 0 = nothing to send now. Never goes back to a stage already sent."""
+    due, sent = t["due_at"], int(t.get("reminders_sent") or 0)
+    if t["status"] != "open" or not due or sent >= 2:
+        return 0
+    if now >= due + timedelta(seconds=overdue_s):
+        return 2
+    if sent == 0 and now >= due - timedelta(seconds=before_s):
+        return 1
+    return 0
+
+
+async def reminder_candidates(now: datetime, before_s: int) -> list[dict[str, Any]]:
+    async with db.get_pool().connection() as conn:
+        cur = await conn.execute(
+            f"SELECT {_COLS}, reminders_sent FROM todos WHERE status = 'open' AND reminders_sent < 2 "
+            "AND due_at IS NOT NULL AND due_at <= %s ORDER BY due_at", (now + timedelta(seconds=before_s),))
+        return await cur.fetchall()
+
+
+async def claim_reminder(todo_id: int, old: int, stage: int) -> bool:
+    """Atomically mark a stage as sent (at most once even if two workers race)."""
+    async with db.get_pool().connection() as conn:
+        cur = await conn.execute("UPDATE todos SET reminders_sent = %s WHERE id = %s AND reminders_sent = %s "
+                                 "AND status = 'open'", (stage, todo_id, old))
+        return cur.rowcount > 0

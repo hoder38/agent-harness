@@ -180,3 +180,61 @@ async def test_dismissing_a_question_cancels_the_run_and_bulk_dismiss_never_touc
     with pytest.raises(ValueError):
         await inbox.dismiss_bulk("approval")
     assert datetime  # silence unused import in minimal envs
+
+
+# ---------------------------------------------------------------- due reminders
+from datetime import timedelta, timezone  # noqa: E402
+
+from app.jobs import todo_jobs  # noqa: E402
+
+NOW = datetime(2026, 11, 2, 9, 0, tzinfo=todos.TZ)   # a Monday
+
+
+def todo(due_in_s, sent=0, status="open", id_=1):
+    return {"id": id_, "title": "Pay rent (private)", "status": status, "reminders_sent": sent,
+            "due_at": NOW + timedelta(seconds=due_in_s)}
+
+
+def test_reminder_stages_fire_once_each_and_never_go_backwards():
+    st = lambda t: todos.reminder_stage(t, NOW, 3600, 3600)   # noqa: E731
+    assert st(todo(7200)) == 0 and st(todo(3000)) == 1 and st(todo(3000, sent=1)) == 0
+    assert st(todo(-1800, sent=1)) == 0 and st(todo(-3600, sent=1)) == 2 and st(todo(-3600, sent=2)) == 0
+    assert st(todo(-86400)) == 2   # created long overdue: one overdue reminder, no "due soon" first
+    assert st(todo(3000, status="done")) == 0
+
+
+def test_quiet_hours_are_weekday_nights_only():
+    q = {"start_hour": 0, "end_hour": 7, "weekdays_only": True}
+    at = lambda day, hour: datetime(2026, 11, day, hour, 30, tzinfo=todos.TZ).astimezone(timezone.utc)   # noqa: E731
+    assert todos.in_quiet_hours(at(2, 3), q) and not todos.in_quiet_hours(at(2, 7), q)    # Mon 03:30 / 07:30
+    assert not todos.in_quiet_hours(at(1, 3), q) and not todos.in_quiet_hours(at(7, 3), q)  # Sun, Sat nights are not quiet
+    assert not todos.in_quiet_hours(at(2, 23), q)
+
+
+async def test_reminder_cron_sends_generic_line_text_full_title_in_inbox_and_respects_quiet(monkeypatch, fake_inbox):
+    sent, claimed = [], []
+
+    async def cands(now, before_s):
+        return [todo(3000, id_=1), todo(-4000, sent=1, id_=2)]
+
+    async def claim(i, old, stage):
+        claimed.append((i, stage))
+        return True
+
+    async def push(to, text):
+        sent.append(text)
+
+    monkeypatch.setattr(todos, "reminder_candidates", cands)
+    monkeypatch.setattr(todos, "claim_reminder", claim)
+    monkeypatch.setattr(todo_jobs.line, "push", push)
+    monkeypatch.setattr(todo_jobs.get_settings(), "line_owner_user_id", "Uowner")
+    monkeypatch.setattr(todo_jobs.get_settings(), "line_channel_access_token", "tok")
+    monkeypatch.setattr(todo_jobs, "datetime", SimpleNamespace(now=lambda tz: NOW.astimezone(tz)))
+    assert await todo_jobs.todo_reminders_cron({}) == 2
+    assert claimed == [(1, 1), (2, 2)]
+    assert sent == ["📌 2 todo reminders (1 overdue). Open the Inbox on the web to see them."]
+    assert "Pay rent" not in sent[0] and fake_inbox.items[1]["title"] == "Todo due soon: Pay rent (private)"
+    assert fake_inbox.items[2]["priority"] == "high"
+    monkeypatch.setattr(todo_jobs, "datetime", SimpleNamespace(now=lambda tz: NOW.replace(hour=3).astimezone(tz)))
+    sent.clear(); claimed.clear()
+    assert await todo_jobs.todo_reminders_cron({}) == 0 and not sent and not claimed   # quiet: nothing, retried later

@@ -177,3 +177,13 @@ inbox:                       # phase 7 (§12 L10): app/inbox.py; todos need no c
   memory_items: true         # every automatic/agent memory write appears as a low-priority item
   keep_done_days: 30         # answered/dismissed items are deleted after this
   keep_low_days: 14          # unread low-priority items (memory writes) are deleted after this
+
+todos:                       # phase 7: reminders for todos with a due date (jobs/todo_jobs.py)
+  reminders:
+    enabled: true
+    before_s: 3600           # first reminder this long before due_at
+    overdue_s: 3600          # second reminder this long after due_at if still open
+    quiet:                   # no reminders in this window; they go out right after it ends
+      start_hour: 0
+      end_hour: 7            # local (Asia/Taipei) hours [0, 7)
+      weekdays_only: true    # Mon-Fri; weekends have no quiet window

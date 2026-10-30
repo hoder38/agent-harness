@@ -142,7 +142,7 @@ Todos (web `/Todos`, agent, Copilot all share one table; due dates are Asia/Taip
 
 Inbox (web `/Inbox`, `/api/agent/inbox`): kinds `approval` (code-change approval), `question` (paused background/coding run), `alert`, `memory` (low-priority note for agent/extraction/Copilot/MCP memory writes).
 Approve/answer resumes the paused run even days later (the Redis pending marker is re-created if it expired); dismissing an approval rejects it. `POST /inbox/dismiss {"kind":"memory"|"alert"}` clears in bulk. A daily 04:00 cron deletes old items (`inbox:` in `config/policy.yaml`).
-Not yet: verify-escalation items, todo reminders.
+Reminders: a todo with a due date gets a reminder 1 h before and 1 h after (Inbox alert; LINE gets a generic line without the title), none Mon-Fri 00:00-07:00 (`todos.reminders` in policy.yaml). Not yet: recurring todos, verify-escalation items (phase 10b).
 
 ## nodeReact integration (deployed in /home/hoder/nodeReact)
 

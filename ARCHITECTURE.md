@@ -1200,11 +1200,11 @@ re-prioritise remaining phases from real usage and the decision log.
 
 ## Implemented 2026-10-30 (phase 7: Todos + Inbox)
 
-- **Todos:** table `todos` (`app/todos.py`). REST `/api/agent/todos` (GET `?status=open|done|all`, POST, PUT, DELETE); agent tools `list_todos`/`add_todo`/`complete_todo` (assistant route only, no delete); MCP `list_todos`/`add_todo`. Due dates are Asia/Taipei; a bare date means 23:59. No reminders yet.
+- **Todos:** table `todos` (`app/todos.py`). REST `/api/agent/todos` (GET `?status=open|done|all`, POST, PUT, DELETE); agent tools `list_todos`/`add_todo`/`complete_todo` (assistant route only, no delete); MCP `list_todos`/`add_todo`. Due dates are Asia/Taipei; a bare date means 23:59. Due reminders: see below.
 - **Inbox:** table `inbox` (`app/inbox.py`), kinds `approval|question|alert|memory`. REST `/api/agent/inbox` (list+counts, `/count`, `/{id}/read`, `/{id}/dismiss`, bulk `/dismiss` for alert|memory only, `/{id}/answer`).
 - **Approvals days later:** coding approvals and background questions create an item (LINE push unless it came from LINE; private threads get a generic text). The LangGraph checkpoint lives in Postgres; if the Redis pending marker expired, `answer` restores it and resumes. It refuses (409) if the thread has moved on. Dismissing an approval = reject (sandbox discarded).
 - Alerts and memory writes feed the Inbox; `inbox_cleanup_cron` (04:00) deletes old done/low items (`inbox:` in policy.yaml).
-- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: todo reminders; verify-escalation → Inbox (needs the general L9 layer, phase 10b).
+- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: verify-escalation → Inbox (needs the general L9 layer, phase 10b).
 
 ### nodeReact tooling notes (found during phase 7)
 
@@ -1212,3 +1212,11 @@ re-prioritise remaining phases from real usage and the decision log.
 - **Front-end tests pass on Node 14 as-is:** `npx jest --config jest.front.cjs --forceExit src/front` gives 18 suites / 1331 tests with the original lockfile. The `@babel/core@7.12.10` failure only happened on host Node 22, so no babel upgrade is needed (an upgrade would rewrite the lockfile to v3 and break plain `npm ci`).
 - **Release build works on Node 14** (`npm run build`, emits `release.js`, checked with the phase 7 pages). The host Node 22 failures (chunk conflict, OpenSSL) are a host-toolchain problem.
 - **Routing fix (found live):** with `grounding.enabled` every non-coding run used the grounded graph, which has no todo tools, so the agent could not manage todos. The assistant route now uses the ReAct graph (`tools_for`), verified live: "add a todo..." created todo #4 with `source_channel=agent`.
+
+### Todo due reminders (phase 7 addition)
+
+- Cron `todo_reminders_cron` (every minute, `jobs/todo_jobs.py`); `todos.reminders_sent` (0 none, 1 due soon, 2 overdue) makes each stage fire once (atomic claim). Changing `due_at` or reopening a todo resets it.
+- Stage 1 `before_s` (1 h) before `due_at`, stage 2 `overdue_s` (1 h) after it if still open; a todo created long overdue gets only the overdue reminder. Config: `todos.reminders` in policy.yaml.
+- Quiet hours: Mon-Fri 00:00-07:00 (Asia/Taipei); nothing is sent or claimed then, so reminders go out right after 07:00. Weekends have no quiet window.
+- Privacy: LINE gets only a generic line ("N todo reminders (K overdue). Open the Inbox..."), never a todo title; the full title is an `alert` item in the Inbox (owner-only web). Per-todo private flag not built.
+- Not done: recurring todos. Verified live with a todo due in 30 min: one Inbox alert, no duplicate on later ticks.

@@ -3,7 +3,7 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from app.config import load_yaml
-from app.jobs import alerts, copilot_jobs, memory_jobs
+from app.jobs import alerts, copilot_jobs, memory_jobs, todo_jobs
 from app.jobs.worker import run_agent, shutdown, startup
 from app.settings import get_settings
 
@@ -66,6 +66,7 @@ class CronSettings:
         cron(memory_jobs.episodes_cron, minute=set(range(0, 60, 5)), second={40}, unique=True, timeout=30),
         cron(copilot_jobs.reconcile_cron, hour={3}, minute={30}, second={0}, unique=True, timeout=60),
         cron(memory_jobs.inbox_cleanup_cron, hour={4}, minute={0}, second={0}, unique=True, timeout=60),
+        cron(todo_jobs.todo_reminders_cron, second={15}, unique=True, timeout=30),
         cron(memory_jobs.sweep_memory_ttl, minute={7}, second={0}, unique=True, timeout=300),
     ]
     on_startup = _cron_startup
