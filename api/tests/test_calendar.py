@@ -103,21 +103,21 @@ def test_day_range_and_event_line():
     assert gcal.line(ev) == "e1 | 2026-11-02 (all day) | A B"
 
 
-def test_private_line_notice_says_what_really_happened_and_where_to_look():
-    from langchain_core.messages import HumanMessage, ToolMessage
+def test_private_line_notice_says_what_really_happened_without_links():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     from app.jobs.worker import _private_line_notice as n
 
     def tool(name, text):
         return ToolMessage(text, tool_call_id="1", name=name)
 
-    base = "https://x.test"
-    assert "Inbox" in n([HumanMessage("x"), tool("add_event", "Proposed (Inbox item #5). NOT")], base)
-    assert "https://x.test/Inbox" in n([HumanMessage("x"), tool("add_event", "Proposed (Inbox item #5).")], base)
-    assert "已新增待辦" in n([HumanMessage("x"), tool("add_todo", "Added todo #1: a")], base)
-    assert "沒有新增" in n([HumanMessage("x"), tool("add_todo", "Not added: bad")], base)
-    assert "沒有新增或修改" in n([HumanMessage("x")], base)   # the model only talked: say nothing was saved
-    assert "已新增待辦" not in n([tool("add_todo", "Added todo #1: a"), HumanMessage("later")], base)   # earlier turn
+    assert "Inbox" in n([HumanMessage("x"), tool("add_event", "Proposed (Inbox item #5). NOT")])
+    assert "已新增待辦" in n([HumanMessage("x"), tool("add_todo", "Added todo #1: a")])
+    assert "http" not in n([HumanMessage("x"), tool("add_todo", "Added todo #1: a")])
+    assert "沒有新增" in n([HumanMessage("x"), tool("add_todo", "Not added: bad")])
+    assert "問題要問你" in n([HumanMessage("x"), AIMessage("要在 8 點還是 9 點?")])   # Qwen is waiting for an answer
+    assert "沒有新增或修改" in n([HumanMessage("x"), AIMessage("好的")])
+    assert "已新增待辦" not in n([tool("add_todo", "Added todo #1: a"), HumanMessage("later")])   # earlier turn
 
 
 def test_assistant_history_hides_earlier_tool_calls_but_keeps_the_current_turn():

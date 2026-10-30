@@ -1248,7 +1248,7 @@ were all seen live (web and LINE); the fixes are deterministic code around the m
 | Wrong or invented arguments (relative dates, "tomorrow+1 day", year 2023) | Tools take words and resolve them in code: `today/tomorrow/day after tomorrow/今天/明天/後天` + HH:MM, `MM/DD`, `MM月DD日`; bad values return "Not added: ..." rather than guessing | `todos.parse_due`, `gcal.when` |
 | Repeats the same call | Duplicate guards: identical todo within 10 min; identical open calendar proposal | `tools/todos.py`, `tools/calendar.py` |
 | Empty final message after a tool result | Reply with the last tool result of the turn | `worker._tool_fallback` |
-| Owner cannot see PRIVATE answers on LINE, so cannot tell what happened | The LINE notice is built from this turn's real tool results (added / proposed / failed / nothing happened) with a link | `worker._private_line_notice` |
+| Owner cannot see PRIVATE answers on LINE, so cannot tell what happened | The LINE notice is built from this turn's real tool results (added / proposed / failed / nothing happened / the assistant is asking you a question that must be answered on the web). No content and no URLs: it only names the page (Todos, Inbox) | `worker._private_line_notice` |
 
 **Rule for new tools:** a tool that writes anything (todo, calendar, memory, later email) must (1) resolve user-facing
 values in code, (2) return a one-line result that starts with a stable prefix (`Added`, `Proposed`, `Not added`) so
