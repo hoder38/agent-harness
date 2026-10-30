@@ -139,6 +139,7 @@ def build_graph(
     tool_limits: dict[str, int] | None = None,
     checkpointer: Any = None,
     drop_old_tools: bool = False,
+    require_tool: str | None = None,
 ):
     bound = llm.bind_tools(tools) if (llm is not None and tools) else llm
     limits = tool_limits or {}
@@ -149,7 +150,15 @@ def build_graph(
         hist = trim_history(state["messages"], max_turns)
         hist = drop_old_tool_turns(hist) if drop_old_tools else stub_old_tool_results(hist)
         msgs = [SystemMessage(system), *repair_tool_calls(hist)]
-        return {"messages": [await bound.ainvoke(msgs)]}
+        resp = await bound.ainvoke(msgs)
+        if require_tool and not resp.tool_calls and not _turn_tool_counts(state["messages"]).get(require_tool):
+            # a small local model sometimes claims it did the action without calling the tool: ask once more, then admit it
+            nudge = HumanMessage(f"You have not called {require_tool} yet, so nothing was saved. Call {require_tool} now "
+                                 "using the details in my last request. Do not answer with text.")
+            resp = await bound.ainvoke([*msgs, resp, nudge]) if resp.content else await bound.ainvoke([*msgs, nudge])
+            if not resp.tool_calls:
+                resp = AIMessage(f"⚠️ 這個動作沒有執行成功(模型沒有呼叫 {require_tool}),請再傳一次。")
+        return {"messages": [resp]}
 
     tool_node = ToolNode(tools) if tools else None
 

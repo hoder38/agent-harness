@@ -160,3 +160,36 @@ def test_api_times_are_taipei_not_utc():
     t = datetime(2026, 10, 31, 0, 30, tzinfo=timezone.utc)
     assert todos.out({"due_at": t, "created_at": t, "updated_at": t})["due_at"] == "2026-10-31T08:30:00+08:00"
     assert inbox.out({"created_at": t, "updated_at": t})["created_at"] == "2026-10-31T08:30:00+08:00"
+
+
+async def test_a_model_that_claims_success_without_calling_the_tool_is_made_to_call_it():
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.graphs.main import build_graph
+    from app.tools import required_tool
+
+    assert required_tool([cal.add_event], "加上明天早上8點半要到士林捷運站") == "add_event"
+    assert required_tool([cal.add_event], "新增待辦 明天早上8點半") is None and required_tool([cal.add_event], "今天天氣") is None
+
+    from langchain_core.tools import tool
+
+    @tool
+    def add_event(title: str, start: str) -> str:
+        """stub"""
+        return "Proposed (Inbox item #1)."
+
+    class Fake(GenericFakeChatModel):
+        def bind_tools(self, tools, **kw):
+            return self
+
+    call = {"name": "add_event", "args": {"title": "x", "start": "tomorrow 08:30"}, "id": "c1"}
+    lying = [AIMessage("已為您建立提案"), AIMessage("", tool_calls=[call]), AIMessage("done")]
+    g = build_graph(Fake(messages=iter(lying)), [add_event], require_tool="add_event")
+    names = [type(m).__name__ for m in (await g.ainvoke({"messages": [HumanMessage("加上明天早上8點半 x")]}))["messages"]]
+    assert "ToolMessage" in names   # the retry produced a real tool call
+
+    stubborn = [AIMessage("已為您建立提案"), AIMessage("還是沒有")]
+    g = build_graph(Fake(messages=iter(stubborn)), [add_event], require_tool="add_event")
+    last = (await g.ainvoke({"messages": [HumanMessage("加上明天早上8點半 x")]}))["messages"][-1]
+    assert "沒有執行成功" in last.content

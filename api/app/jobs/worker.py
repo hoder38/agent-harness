@@ -20,7 +20,7 @@ from ..graphs.main import build_graph, system_prompt
 from ..llm.client import CloudBlocked, make_llm
 from ..models import LOCAL_MODELS, Decision, Job
 from ..telemetry import setup_tracing
-from ..tools import narrow_for_intent, tools_for
+from ..tools import narrow_for_intent, required_tool, tools_for
 from ..tools.sandbox import SandboxClient, coding_config
 from . import memory_jobs
 from .alerts import check_budget, send_alert
@@ -238,11 +238,13 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         else:
             tools = tools_for(route, private=decision.private, local=model in LOCAL_MODELS)
             tools = narrow_for_intent(tools, payload["text"])
+            need = required_tool(tools, payload["text"])
             graph = build_graph(
                 llm, tools,
                 system=system_prompt(route, job.channel, model, web=any(t.name == "fetch_page" for t in tools)),
                 max_turns=min(max_turns, int(ex.get("assistant_history_turns", 8))) if route == "assistant" else max_turns,
                 drop_old_tools=route == "assistant",
+                require_tool=need,
                 tool_limits={k: int(v) for k, v in (pol.get("tool_limits") or {}).items()},
                 checkpointer=ctx["checkpointer"],
             )

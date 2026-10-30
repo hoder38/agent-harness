@@ -68,6 +68,16 @@ _ADD_WORDS = re.compile(r"^\s*(?:/\w+\s+)?(?:幫我|請)?(?:加上|加入|新增
 _SLOT = re.compile(r"\d{1,2}\s*[:點時]|早上|上午|中午|下午|晚上|凌晨|\d\s*(?:am|pm)", re.I)
 
 
+def required_tool(tools: list, text: str) -> str | None:
+    """The write tool a clear request must end up calling (the model is made to call it or the run says it failed)."""
+    names = {t.name for t in tools}
+    if "add_event" in names and not _TODO_WORDS.search(text) and _ADD_WORDS.search(text) and _SLOT.search(text):
+        return "add_event"
+    if "add_todo" in names and re.search(r"新增待辦|加入待辦|新增代辦|add (?:a )?todo", text, re.I):
+        return "add_todo"
+    return None
+
+
 def narrow_for_intent(tools: list, text: str) -> list:
     """A small local model files every "add ..." as a todo, so decide the obvious cases here, without a model:
     an add request with a time of day (and no todo word) is a calendar event; an explicit todo/reminder is not."""
