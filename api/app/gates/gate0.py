@@ -112,6 +112,9 @@ def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool
         private = True
         reasons.append("thread already contains PRIVATE content")
 
+    if channel == "line":
+        private = False  # LINE is never PRIVATE; secrets are still redacted above
+
     return Gate0Result(
         text=text,
         redacted_text=redacted,

@@ -53,3 +53,10 @@ def test_line_ignores_topic_keywords_but_web_does_not():
     j = job("幫我規劃東京行程", channel="line")
     assert gate0(j, rules, channel="line").privacy_tag is None
     assert gate0(j, rules, channel="web").privacy_tag == "PRIVATE"
+
+
+def test_line_is_never_private_but_still_redacts():
+    rules = {"private_keywords": ["行程"], "private_sources": ["line"]}
+    j = job("行程 key sk-abcdefghijklmnopqrstuvwx", channel="line", source="line", thread_id="line:u:2")
+    r = gate0(j, rules, thread_private=True, channel="line")
+    assert r.privacy_tag is None and "sk-abcdefgh" not in r.redacted_text
