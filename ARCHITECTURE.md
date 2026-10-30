@@ -1220,3 +1220,5 @@ re-prioritise remaining phases from real usage and the decision log.
 - Quiet hours: Mon-Fri 00:00-07:00 (Asia/Taipei); nothing is sent or claimed then, so reminders go out right after 07:00. Weekends have no quiet window.
 - Privacy: LINE gets only a generic line ("N todo reminders (K overdue). Open the Inbox..."), never a todo title; the full title is an `alert` item in the Inbox (owner-only web). Per-todo private flag not built.
 - Not done: recurring todos. Verified live with a todo due in 30 min: one Inbox alert, no duplicate on later ticks.
+
+- **Live check of "approval resumes after days" (2026-10-30):** a real `/code` run paused at the approval; I deleted its Redis `pending:` marker (what expiry does), then dismissed the Inbox item. The marker was restored, the checkpoint resumed from Postgres, the run replied "Discarded; nothing was committed", the item became `done`, and no branch or sandbox clone was left. The Approve path (`/inbox/{id}/answer`) shares `submit_answer` but was only unit-tested, not run live.
