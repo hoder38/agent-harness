@@ -118,9 +118,10 @@ def test_line_avoids_cloud_strong(policy):
     assert d(policy, j=job(channel="line"), r=rr(tier="cloud_strong")).model == "cloud_fast"
 
 
-def test_line_coding_goes_background(policy):
-    out = d(policy, j=job(channel="line"), r=rr(intent="coding"))
-    assert out.route == "coding" and out.queue == "background"
+def test_line_is_chat_only(policy):
+    for intent in ("coding", "assistant"):
+        assert d(policy, j=job(channel="line"), r=rr(intent=intent)).route == "chat"
+    assert d(policy, j=job(channel="web"), r=rr(intent="coding")).route == "coding"
 
 
 # 7. background budget

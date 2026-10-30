@@ -210,3 +210,10 @@ def test_month_day_due_dates_and_deadline_phrases_require_add_todo():
         assert required_tool(TODO_TOOLS, text) == "add_todo"
     for text in ("我有什麼待辦?", "列出待辦", "今天天氣"):
         assert required_tool(TODO_TOOLS, text) is None
+
+
+def test_line_write_requests_are_detected_but_chat_is_not():
+    from app.pipeline import _line_write_request as w
+
+    assert w("加上明天早上8點半要到士林捷運站") and w("11/5前繳電費") and w("/local 新增待辦 洗車")
+    assert not w("今天天氣如何?") and not w("我有什麼待辦?") and not w("你好")

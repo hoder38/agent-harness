@@ -117,9 +117,9 @@ def decide(
         if model == "cloud_strong" and "model" not in locked:
             model = "cloud_fast"
             reasons.append("6: LINE → cloud_fast (short answer)")
-        if route == "coding":
-            queue = "background"
-            reasons.append("6: LINE coding → background, approvals via Inbox")
+        if route not in ("chat", "defer"):   # LINE is for chat and notifications only; work happens on the web
+            reasons.append(f"6: LINE → chat (was {route})")
+            route = "chat"
 
     # 7. background → stricter budget
     if job.mode == "background" and model == "cloud_strong":

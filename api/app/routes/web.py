@@ -172,9 +172,12 @@ async def list_threads(owner: str = Depends(require_owner)):
     if uid := get_settings().line_owner_user_id:
         prefixes += (f"line:{uid}",)
     rows = await db.list_threads(prefixes)
+    r = state.get_redis()
+    private = {t["thread_id"] for t in rows if await state.is_thread_private(r, t["thread_id"])}
     return {"threads": [{"id": _public_tid(r["thread_id"]),
                          "title": _thread_title(r["thread_id"], r["first_text"]),
                          "channel": r["thread_id"].split(":", 1)[0],
+                         "private": r["thread_id"] in private,
                          "updated_at": r["updated_at"].isoformat()} for r in rows]}
 
 

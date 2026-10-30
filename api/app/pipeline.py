@@ -105,6 +105,16 @@ def _with_clarification(request: str, question: str | None, answer: str) -> str:
     return "\n".join(parts)
 
 
+def _line_write_request(text: str) -> bool:
+    """Clear add-a-todo / add-an-event phrasings (the same cheap rules the assistant route uses), checked in code."""
+    from types import SimpleNamespace
+
+    from .tools import required_tool
+
+    t = re.sub(r"^\s*/\w+\s+", "", text)
+    return required_tool([SimpleNamespace(name="add_todo"), SimpleNamespace(name="add_event")], t) is not None
+
+
 async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None = None) -> SubmitResult:
     r = state.get_redis()
     if not await state.dedupe(r, job.dedupe_key):
@@ -118,6 +128,9 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         return SubmitResult(command_reply=await _remember(job, fact))
     if not skip and (reply := await handle_command(job.text or "", source=job.channel)):
         return SubmitResult(command_reply=reply)
+
+    if not skip and job.channel == "line" and not pending and _line_write_request(job.text or ""):
+        return SubmitResult(command_reply="LINE 只能聊天和收通知,不能新增待辦或行事曆。請到網頁用同樣的句子操作。")
 
     t0 = time.monotonic()
     pol = config.policy()

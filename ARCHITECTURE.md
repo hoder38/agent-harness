@@ -1260,3 +1260,5 @@ both tools available when the request is ambiguous.
 **Not done / limits:** the rules only cover clear phrasings; an ambiguous message ("新增 買牛奶") can still be filed in
 the wrong place. A general model-based verifier for tool use belongs to phase 10b (L9 verify layer), and must stay
 local for PRIVATE text. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
+
+- **LINE is chat + notify only (2026-10-30):** `decision` rule 6 forces every LINE message to the `chat` route (no todo/calendar/coding tools; models stay local or cloud_fast). A clear add-todo/add-event phrasing on LINE is answered in code ("use the web") before any model runs (`pipeline._line_write_request`), so the model cannot claim it saved something. Todos, calendar and approvals are done on the web. `GET /threads` now returns `private`; the web chat list shows 🔒 and the header shows "Private · local only" for a locked thread (a new chat unlocks).
