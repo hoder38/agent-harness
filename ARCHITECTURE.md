@@ -567,6 +567,8 @@ Container with NVML access (`capabilities: [utility]`) and read-only Docker even
 
 ## 12. L9 Verify layer & L10 Approval/Output
 
+> **Status:** only coding verify (phase 5) and grounded claim verification (phase 8a) are implemented. The general model check + tier escalation below is planned as phase 10b (§15); until then no run is escalated or sent to the Inbox for failing verification.
+
 Verify (skip for trivial chat):
 1. Deterministic: coding → harness-run tests/lint/build; assistant → schema valid, no tool errors, citations present when RAG used.
 2. Model check: Jev `Noul("The response fully and correctly answers the request")` for non-private; Qwen for private; deterministic-only when GAMING + private.
@@ -1087,6 +1089,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
+| 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — planned. Today only coding verify (phase 5) and grounded claim verification (phase 8a) exist; the Inbox (phase 7) is ready to receive the failure items | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
 | 11 | Cron/events, eval suite in CI, monthly restore test | Morning brief runs; eval regression check; restore test passes |
 
 ## 16. Security checklist
@@ -1201,7 +1204,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - **Inbox:** table `inbox` (`app/inbox.py`), kinds `approval|question|alert|memory`. REST `/api/agent/inbox` (list+counts, `/count`, `/{id}/read`, `/{id}/dismiss`, bulk `/dismiss` for alert|memory only, `/{id}/answer`).
 - **Approvals days later:** coding approvals and background questions create an item (LINE push unless it came from LINE; private threads get a generic text). The LangGraph checkpoint lives in Postgres; if the Redis pending marker expired, `answer` restores it and resumes. It refuses (409) if the thread has moved on. Dismissing an approval = reject (sandbox discarded).
 - Alerts and memory writes feed the Inbox; `inbox_cleanup_cron` (04:00) deletes old done/low items (`inbox:` in policy.yaml).
-- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: verify-escalation → Inbox, todo reminders.
+- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: todo reminders; verify-escalation → Inbox (needs the general L9 layer, phase 10b).
 
 ### nodeReact tooling notes (found during phase 7)
 
