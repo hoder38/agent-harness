@@ -1,5 +1,5 @@
 """Phase 7: todos (parse, tools, MCP) and the Inbox (approval notify, answer after Redis expiry, bulk rules)."""
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +29,7 @@ class FakeTodos:
 
     async def add(self, title, *, notes="", due_at=None, channel="web"):
         t = {"id": len(self.rows) + 1, "title": title, "notes": notes, "status": "open", "due_at": due_at,
-             "source_channel": channel}
+             "source_channel": channel, "created_at": datetime.now(timezone.utc)}
         self.rows[t["id"]] = t
         return t
 
@@ -53,7 +53,7 @@ def fake_todos(monkeypatch):
 
 async def test_agent_and_mcp_tools_share_the_todo_table(fake_todos):
     out = await todo_tools.add_todo.ainvoke({"title": "Buy tea", "due": "2026-11-02"})
-    assert out == "Added todo #1: Buy tea"
+    assert out == "Added todo #1: Buy tea (due 2026-11-02 23:59)"
     assert fake_todos.rows[1]["source_channel"] == "agent" and fake_todos.rows[1]["due_at"].hour == 23
     assert "Not added" in await todo_tools.add_todo.ainvoke({"title": "x", "due": "someday"})
     assert "Added todo #2" in await mcp_server.add_todo("Review PR", "2026-11-03T10:00")
@@ -238,3 +238,28 @@ async def test_reminder_cron_sends_generic_line_text_full_title_in_inbox_and_res
     monkeypatch.setattr(todo_jobs, "datetime", SimpleNamespace(now=lambda tz: NOW.replace(hour=3).astimezone(tz)))
     sent.clear(); claimed.clear()
     assert await todo_jobs.todo_reminders_cron({}) == 0 and not sent and not claimed   # quiet: nothing, retried later
+
+
+def test_empty_final_reply_after_a_tool_call_falls_back_to_the_tool_result():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from app.jobs.worker import _tool_fallback
+    msgs = [HumanMessage("old"), ToolMessage("stale", tool_call_id="0"), HumanMessage("add a todo"),
+            AIMessage("", tool_calls=[{"name": "add_todo", "args": {}, "id": "1"}]),
+            ToolMessage("Added todo #6: 到士林捷運站", tool_call_id="1"), AIMessage("")]
+    assert _tool_fallback(msgs) == "Added todo #6: 到士林捷運站"
+    assert _tool_fallback([HumanMessage("hi"), AIMessage("")]) == ""   # nothing from an earlier turn leaks in
+
+
+def test_parse_due_resolves_today_and_tomorrow_words_in_taipei():
+    now = datetime.now(todos.TZ)
+    d = todos.parse_due("tomorrow 07:30")
+    assert (d.date() - now.date()).days == 1 and (d.hour, d.minute) == (7, 30)
+    assert todos.parse_due("明天07:30") == d and todos.parse_due("today").hour == 23
+    assert (todos.parse_due("後天 9:05").date() - now.date()).days == 2
+
+
+async def test_repeated_identical_add_todo_call_does_not_create_a_duplicate(fake_todos):
+    first = await todo_tools.add_todo.ainvoke({"title": "Buy milk", "due": "2026-11-02"})
+    again = await todo_tools.add_todo.ainvoke({"title": "Buy  milk", "due": "2026-11-02"})
+    assert first.startswith("Added todo #1") and again == "Already added: todo #1: Buy milk" and len(fake_todos.rows) == 1
+    assert (await todo_tools.add_todo.ainvoke({"title": "Buy milk", "due": "2026-11-03"})).startswith("Added todo #2")

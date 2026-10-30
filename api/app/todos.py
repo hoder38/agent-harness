@@ -1,4 +1,5 @@
 """Todos (§10): one table used by the web UI (REST), agent tools and Copilot (MCP)."""
+import re
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -10,11 +11,19 @@ STATUSES = ("open", "done")
 _COLS = "id, title, notes, status, due_at, source_channel, created_at, updated_at"
 
 
+_REL_DAYS = {"today": 0, "tomorrow": 1, "今天": 0, "明天": 1, "後天": 2, "后天": 2}
+_REL = re.compile(r"^(?P<day>today|tomorrow|今天|明天|後天|后天)\s*(?:T|\s)?\s*(?P<time>\d{1,2}:\d{2})?$", re.I)
+
+
 def parse_due(value: str | None) -> datetime | None:
     """ISO date or datetime; naive values are Asia/Taipei. A bare date means end of that day."""
     v = (value or "").strip()
     if not v:
         return None
+    if m := _REL.match(v):   # small local models get "tomorrow" arithmetic wrong, so resolve it here
+        day = datetime.now(TZ) + timedelta(days=_REL_DAYS[m["day"].lower()])
+        hh, mm = (int(x) for x in (m["time"] or "23:59").split(":"))
+        return day.replace(hour=hh, minute=mm, second=0, microsecond=0)
     try:
         dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
     except ValueError as e:

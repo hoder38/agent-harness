@@ -79,6 +79,17 @@ def _use_grounded(pol: dict[str, Any]) -> bool:
     return bool((pol.get("grounding") or {}).get("enabled"))
 
 
+def _tool_fallback(messages: list[Any]) -> str:
+    """Local models sometimes end a tool run with an empty message. Our tools return readable one-liners
+    ("Added todo #6: ..."), so reply with the last tool result of this turn instead of nothing."""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage) and (t := _text(m.content).strip()):
+            return t
+    return ""
+
+
 def _gaming_model(decision: Decision, ks: str) -> str:
     """Model for a run that would use the GPU while GAMING (§11); "defer" = wait for the GPU."""
     if decision.private:
@@ -321,6 +332,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         if isinstance(m, AIMessage):
             final = _text(m.content)
             break
+    if not final.strip():
+        final = _tool_fallback(vals.get("messages", []))
     done: dict[str, Any] = {"text": final, "model": model, "usage": usage, "cost_usd": cost, "ms": elapsed}
     outcome: dict[str, Any] = {"status": "done", "usage": usage, "ms": elapsed, "model": model}
     if grounded and vals.get("answer"):
