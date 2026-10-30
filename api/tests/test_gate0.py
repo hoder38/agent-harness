@@ -46,3 +46,10 @@ def test_extra_private_pattern():
     rules = {"extra_patterns": [{"name": "acct", "regex": r"ACCT-\d{4}", "private": True}]}
     r = gate0(job("pay ACCT-1234"), rules)
     assert r.privacy_tag == "PRIVATE" and "ACCT-1234" not in r.redacted_text
+
+
+def test_line_ignores_topic_keywords_but_web_does_not():
+    rules = {"private_keywords": ["行程"]}
+    job = job("幫我規劃東京行程", channel="line")
+    assert gate0(job, rules, channel="line").privacy_tag is None
+    assert gate0(job, rules, channel="web").privacy_tag == "PRIVATE"

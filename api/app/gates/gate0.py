@@ -75,7 +75,7 @@ def redact(text: str, rules: dict[str, Any] | None = None) -> tuple[str, list[st
     return redacted, findings, private_hits
 
 
-def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool = False) -> Gate0Result:
+def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool = False, channel: str | None = None) -> Gate0Result:
     rules = rules or {}
     text = job.text or ""
     reasons: list[str] = []
@@ -94,13 +94,15 @@ def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool
     if findings:
         reasons.append("redacted: " + ",".join(findings))
 
+    # LINE has no private tools or content, so only secret patterns lock it.
+    topical = channel != "line"
     private_sources = set(rules.get("private_sources") or [])
-    if job.source and job.source in private_sources:
+    if topical and job.source and job.source in private_sources:
         private = True
         reasons.append(f"source={job.source} is PRIVATE")
 
     lowered = text.lower()
-    for kw in rules.get("private_keywords") or []:
+    for kw in (rules.get("private_keywords") or []) if topical else []:
         if kw.lower() in lowered:
             private = True
             reasons.append(f"keyword '{kw}' is PRIVATE")

@@ -88,7 +88,8 @@ async def _remember(job: Job, fact: str) -> str:
         return "Usage: /remember <fact>, e.g. /remember I prefer answers in bullet points"
     r = state.get_redis()
     g0 = gate0(Job(**{**job.model_dump(), "text": fact}), config.privacy_rules(),
-               thread_private=await state.is_thread_private(r, job.thread_id))
+               thread_private=await state.is_thread_private(r, job.thread_id),
+             channel=job.channel)
     private = g0.privacy_tag == "PRIVATE" or bool(g0.findings)
     await memory.remember("profile", fact, private=private, kind="explicit",
                           source={"thread_id": job.thread_id, "channel": job.channel})
@@ -137,7 +138,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     gpu, ks = await state.get_gpu_state(r), await state.get_killswitch(r)
     budget = await state.get_budget(r, pol)
 
-    g0 = gate0(job, config.privacy_rules(), thread_private=await state.is_thread_private(r, job.thread_id))
+    g0 = gate0(job, config.privacy_rules(), thread_private=await state.is_thread_private(r, job.thread_id),
+             channel=job.channel)
     if g0.privacy_tag is None:
         g1 = await gate1(g0.text)  # deferred stub → None
         g0.privacy_tag = "PRIVATE" if g1 else "NORMAL"
