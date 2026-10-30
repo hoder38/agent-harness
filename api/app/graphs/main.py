@@ -16,7 +16,7 @@ ROUTE_HINTS = {
     "clarify": ("The request is ambiguous. Do not answer it yet. Ask ONE short clarifying question about the "
                 "single most important missing detail (which thing, time, place, version, or goal); you may "
                 "offer up to 3 short options. Nothing else."),
-    "assistant": "Help with personal organisation. Todo/calendar tools are not connected yet; say so if needed.",
+    "assistant": "Help with personal organisation. You can manage the owner's todo list with list_todos, add_todo and complete_todo (use them instead of just talking about todos); calendar and email tools are not connected yet, say so if needed.",
 }
 
 

@@ -167,7 +167,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     ex = pol.get("executor", {})
     gov = pol.get("gpu_governor") or {}
     coding = route == "coding"
-    grounded = _use_grounded(pol) and not coding
+    # the assistant route needs its own tools (todos), which the grounded graph does not have
+    grounded = _use_grounded(pol) and not coding and route != "assistant"
     usage = {"input": 0, "output": 0}
     streamed = False
     cancelled = False

@@ -129,6 +129,21 @@ docker compose up -d --build
 - Inside Copilot, the `harness-memory` MCP tools are `recall`, `remember` and `get_thread_summary`. PRIVATE memories are never returned.
 - Config: `copilot_ingest` in `config/policy.yaml`; the session folder is `COPILOT_SESSIONS_DIR` in `.env`.
 
+## Todos & Inbox (phase 7, ARCHITECTURE.md §12 L10)
+
+Todos (web `/Todos`, agent, Copilot all share one table; due dates are Asia/Taipei, a bare date = 23:59):
+
+- **Web:** nodeReact `/Todos`: add with a due date, edit, done/reopen, delete.
+- **Agent** (assistant route; no delete): "Please add a todo: submit the report by 2026-11-06, then list my open todos." uses `add_todo`/`list_todos`; "mark #3 done" uses `complete_todo`.
+- **Copilot (MCP `harness-memory`):** `add_todo(title, due?, notes?)`, `list_todos()` -> `[ ] #1 Buy tea (due 2026-11-02 23:59)`.
+- **REST** (JWT from `python -m app.tools.mint_token`):
+  `POST /api/agent/todos {"title":"Buy tea","due_at":"2026-11-02"}`, `GET /api/agent/todos?status=open|done|all`,
+  `PUT /api/agent/todos/1 {"status":"done"}` (`"due_at":""` clears the date), `DELETE /api/agent/todos/1`.
+
+Inbox (web `/Inbox`, `/api/agent/inbox`): kinds `approval` (code-change approval), `question` (paused background/coding run), `alert`, `memory` (low-priority note for agent/extraction/Copilot/MCP memory writes).
+Approve/answer resumes the paused run even days later (the Redis pending marker is re-created if it expired); dismissing an approval rejects it. `POST /inbox/dismiss {"kind":"memory"|"alert"}` clears in bulk. A daily 04:00 cron deletes old items (`inbox:` in `config/policy.yaml`).
+Not yet: verify-escalation items, todo reminders.
+
 ## nodeReact integration (deployed in /home/hoder/nodeReact)
 
 - `config/nginx-release.conf`: `/api/agent/` and `/line/webhook` proxy to `agent-api:8000` (network `anomopi_default`).
