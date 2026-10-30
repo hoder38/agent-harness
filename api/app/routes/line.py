@@ -30,7 +30,7 @@ async def handle_event(ev: dict[str, Any], enqueue: pipeline.Enqueue) -> None:
             await line.reply(reply_token, "Only text is supported for now (voice/image/video arrive in phase 9).")
         return
 
-    job = Job(channel="line", mode="interactive", user_id=s.owner_id, thread_id=f"line:{user_id}",
+    job = Job(channel="line", mode="interactive", user_id=s.owner_id, thread_id=line.thread_id(user_id),
               text=msg.get("text", ""), dedupe_key=f"line:{ev.get('webhookEventId') or msg.get('id')}")
     delivery = {"line_user_id": user_id, "reply_token": reply_token, "reply_ts": time.time()}
     res = await pipeline.submit(job, enqueue, delivery=delivery)

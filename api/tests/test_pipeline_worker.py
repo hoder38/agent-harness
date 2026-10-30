@@ -104,7 +104,7 @@ async def test_line_owner_only_and_dedupe(redis, enq, monkeypatch):
     assert len(enq.calls) == 1
     d = enq.calls[0]["payload"]["delivery"]
     assert d["line_user_id"] == "Uowner" and d["reply_token"] == "R"
-    assert enq.calls[0]["payload"]["job"]["thread_id"] == "line:Uowner"
+    assert enq.calls[0]["payload"]["job"]["thread_id"] == "line:Uowner:2"
 
 
 # ---------------------------------------------------------------- worker

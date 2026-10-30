@@ -43,6 +43,11 @@ async def reply(reply_token: str, text: str) -> None:
     await _post("/v2/bot/message/reply", {"replyToken": reply_token, "messages": _messages(text)})
 
 
+def thread_id(user_id: str) -> str:
+    """The owner's LINE conversation. ":2" retired the first thread (it was locked PRIVATE with old private history)."""
+    return f"line:{user_id}:2"
+
+
 async def push(to: str, text: str) -> None:
     await _post("/v2/bot/message/push", {"to": to, "messages": _messages(text)})
 

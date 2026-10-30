@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from .. import config, db, inbox, pipeline, state
+from ..channels import line
 from ..auth import require_owner
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import build_grounded_graph
@@ -31,7 +32,7 @@ def _thread_id(tid: str) -> str:
         uid = get_settings().line_owner_user_id
         if not uid:
             raise HTTPException(404, "LINE is not configured")
-        return f"line:{uid}"
+        return line.thread_id(uid)
     if not _THREAD_RE.match(tid):
         raise HTTPException(400, "thread id must match [A-Za-z0-9_-]{1,64}")
     return f"web:{tid}"
