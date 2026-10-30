@@ -15,6 +15,9 @@ _REL_DAYS = {"today": 0, "tomorrow": 1, "day after tomorrow": 2, "今天": 0, "�
 _REL = re.compile(r"^(?P<day>today|day after tomorrow|tomorrow|今天|明天|後天|后天)\s*(?:T|\s)?\s*(?P<time>\d{1,2}:\d{2})?$", re.I)
 
 
+_MD = re.compile(r"^(?P<m>\d{1,2})\s*[/月]\s*(?P<d>\d{1,2})\s*日?\s*(?:T|\s)?\s*(?P<time>\d{1,2}:\d{2})?$")
+
+
 def parse_due(value: str | None) -> datetime | None:
     """ISO date or datetime; naive values are Asia/Taipei. A bare date means end of that day."""
     v = (value or "").strip()
@@ -24,6 +27,16 @@ def parse_due(value: str | None) -> datetime | None:
         day = datetime.now(TZ) + timedelta(days=_REL_DAYS[m["day"].lower()])
         hh, mm = (int(x) for x in (m["time"] or "23:59").split(":"))
         return day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if m := _MD.match(v):   # "11/5", "11月5日": the next such date (this year, or next year if it has passed)
+        now = datetime.now(TZ)
+        hh, mm = (int(x) for x in (m["time"] or "23:59").split(":"))
+        try:
+            dt = now.replace(month=int(m["m"]), day=int(m["d"]), hour=hh, minute=mm, second=0, microsecond=0)
+            if dt.date() < now.date():
+                dt = dt.replace(year=now.year + 1)
+        except ValueError as e:
+            raise ValueError(f"bad due date {value!r}") from e
+        return dt
     try:
         dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
     except ValueError as e:

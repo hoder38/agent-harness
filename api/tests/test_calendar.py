@@ -193,3 +193,20 @@ async def test_a_model_that_claims_success_without_calling_the_tool_is_made_to_c
     g = build_graph(Fake(messages=iter(stubborn)), [add_event], require_tool="add_event")
     last = (await g.ainvoke({"messages": [HumanMessage("加上明天早上8點半 x")]}))["messages"][-1]
     assert "沒有執行成功" in last.content
+
+
+def test_month_day_due_dates_and_deadline_phrases_require_add_todo():
+    from app.tools import required_tool
+    from app.tools.todos import TODO_TOOLS
+
+    now = datetime.now(todos.TZ)
+    d = todos.parse_due("11/5")
+    assert (d.month, d.day, d.hour, d.minute) == (11, 5, 23, 59) and d.date() >= now.date()
+    assert todos.parse_due("11月5日 09:30").hour == 9
+    assert todos.parse_due(f"{now.month}/{now.day}").date() == now.date()
+    with pytest.raises(ValueError):
+        todos.parse_due("13/45")
+    for text in ("11/5前繳電費", "記得買牛奶", "新增待辦 洗車"):
+        assert required_tool(TODO_TOOLS, text) == "add_todo"
+    for text in ("我有什麼待辦?", "列出待辦", "今天天氣"):
+        assert required_tool(TODO_TOOLS, text) is None

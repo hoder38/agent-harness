@@ -15,7 +15,7 @@ async def list_todos(status: str = "open") -> str:
 
 @tool
 async def add_todo(title: str, due: str | None = None, notes: str = "") -> str:
-    """Add a todo. `due` is optional: YYYY-MM-DD, YYYY-MM-DDTHH:MM, or "today"/"tomorrow" optionally followed by
+    """Add a todo. `due` is optional: YYYY-MM-DD, MM/DD (e.g. "11/5"; the next such date), YYYY-MM-DDTHH:MM, or "today"/"tomorrow" optionally followed by
     HH:MM (e.g. "tomorrow 07:30"), all in Asia/Taipei. Pass relative days as words; do not compute the date yourself."""
     try:
         due_at = todos.parse_due(due)

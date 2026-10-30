@@ -65,6 +65,7 @@ def tools_for(route: str, *, private: bool = False, local: bool = False) -> list
 
 _TODO_WORDS = re.compile(r"待辦|代辦|todo|提醒|記得|to-do", re.I)
 _ADD_WORDS = re.compile(r"^\s*(?:/\w+\s+)?(?:幫我|請)?(?:加上|加入|新增|安排|預約|約|add)|開會|會議|行程|約會|預約")
+_QUERY = re.compile(r"[?？]|什麼|哪些|有沒有|查|列出|顯示|list|what|完成了")
 _SLOT = re.compile(r"\d{1,2}\s*[:點時]|早上|上午|中午|下午|晚上|凌晨|\d\s*(?:am|pm)", re.I)
 
 
@@ -73,7 +74,9 @@ def required_tool(tools: list, text: str) -> str | None:
     names = {t.name for t in tools}
     if "add_event" in names and not _TODO_WORDS.search(text) and _ADD_WORDS.search(text) and _SLOT.search(text):
         return "add_event"
-    if "add_todo" in names and re.search(r"新增待辦|加入待辦|新增代辦|add (?:a )?todo", text, re.I):
+    if "add_todo" in names and not _QUERY.search(text) and (
+            re.search(r"新增待辦|加入待辦|新增代辦|add (?:a )?todo", text, re.I) or _TODO_WORDS.search(text)
+            or re.search(r"\d{1,2}\s*[/月]\s*\d{1,2}\s*日?\s*前|前.{0,3}(?:繳|交|付|買|完成|處理)", text)):
         return "add_todo"
     return None
 
