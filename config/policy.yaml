@@ -178,6 +178,9 @@ inbox:                       # phase 7 (§12 L10): app/inbox.py; todos need no c
   keep_done_days: 30         # answered/dismissed items are deleted after this
   keep_low_days: 14          # unread low-priority items (memory writes) are deleted after this
 
+calendar:                    # phase 7b: app/gcal.py + tools/calendar.py; needs host/google_auth.py to have run
+  enabled: true              # writes are Inbox proposals; the grant is calendar.events only
+
 todos:                       # phase 7: reminders for todos with a due date (jobs/todo_jobs.py)
   reminders:
     enabled: true

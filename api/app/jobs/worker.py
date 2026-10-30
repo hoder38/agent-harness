@@ -203,7 +203,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns)
             answer_nodes = {"compose"}
         else:
-            tools = tools_for(route, private=decision.private)
+            tools = tools_for(route, private=decision.private, local=model in LOCAL_MODELS)
             graph = build_graph(
                 llm, tools,
                 system=system_prompt(route, job.channel, model, web=any(t.name == "fetch_page" for t in tools)),

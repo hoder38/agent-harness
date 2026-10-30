@@ -208,3 +208,9 @@ docker compose run --rm agent-test python -m pytest -q -p no:cacheprovider
 
 **Known limitation**
 - agent-api joins `anomopi_default` so nginx can reach it, which gives agent-api direct egress. The workers, which run the tools, stay internal.
+
+## Google Calendar (phase 7b)
+
+One-time setup on the host: `python3 host/google_auth.py` (reads `GOOGLE_ID`/`GOOGLE_SECRET` from nodeReact's `.env`, asks you to paste the final redirect URL, writes `~/.config/harness/google/calendar.json`, mounted read-only at `/google`). Scope is `calendar.events` only, a separate grant from nodeReact's Drive token. Enable with `calendar.enabled` in `config/policy.yaml`.
+
+The assistant route (local models only; calendar words mark the message PRIVATE) gets `list_events`, `add_event`, `delete_event`. Add and delete never touch Google directly: they create an approval item in the Inbox (plus a content-free LINE push), and the change is made when you press Approve.

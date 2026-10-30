@@ -48,6 +48,7 @@ x-app: &app
     - ./config:/config:ro
     - ${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro
     - ${COPILOT_SESSIONS_DIR:-/home/hoder/.copilot/session-state}:/copilot-sessions:ro   # phase 6 ingest (§9b)
+    - ${GOOGLE_DIR:-/home/hoder/.config/harness/google}:/google:ro   # phase 7b Calendar grant (host/google_auth.py)
   restart: unless-stopped
   networks: [agent]
   depends_on:

@@ -74,6 +74,16 @@ async def answer_item(item_id: int, body: AnswerBody, request: Request, owner: s
     item = await inbox.get(item_id)
     if not item:
         raise HTTPException(404, "unknown item")
+    if (item.get("detail") or {}).get("calendar") and item["status"] == "open":   # approved calendar proposal
+        from ..tools.calendar import execute
+        from .. import gcal
+
+        try:
+            done = await execute(item["detail"])
+        except gcal.CalendarError as e:
+            raise HTTPException(502, str(e))
+        await inbox.set_status(item_id, "done")
+        return {"ok": True, "result": done}
     if item["kind"] not in inbox.ACTIONABLE or not item["run_id"]:
         raise HTTPException(409, "this item has nothing to answer")
     if item["status"] != "open":

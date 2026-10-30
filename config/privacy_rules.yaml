@@ -13,7 +13,11 @@ extra_patterns: []
 #  - { name: tw_bank_account, kind: pii, regex: '\b\d{3}-\d{2}-\d{6,8}\b', private: true }
 
 # Keywords that mark a message PRIVATE outright (case-insensitive substring match).
-private_keywords: []
+private_keywords:     # calendar questions must stay on local models (the calendar tools are local-only)
+  - "行事曆"
+  - "日曆"
+  - "calendar"
+  - "行程"
 #  - "my salary"
 
 # Docs-folder subfolders (any level) whose documents are PRIVATE (RAG §10). Frontmatter `privacy: private` also works.

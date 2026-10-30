@@ -6,6 +6,9 @@ api.search.brave.com
 # LLM providers
 api.openai.com
 api.anthropic.com
+# Google Calendar (phase 7b)
+www.googleapis.com
+oauth2.googleapis.com
 # LINE
 api.line.me
 api-data.line.me
