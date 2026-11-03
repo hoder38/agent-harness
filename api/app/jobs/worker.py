@@ -42,6 +42,8 @@ def _text(content: Any) -> str:
 
 async def startup(ctx: dict[str, Any]) -> None:
     logging.basicConfig(level=logging.INFO)
+    # The arq CLI already gives the "arq" logger its own handler; without this every job line is printed twice.
+    logging.getLogger("arq").propagate = False
     setup_tracing("agent-worker")
     pool = await db.open_db()
     saver = AsyncPostgresSaver(conn=pool)

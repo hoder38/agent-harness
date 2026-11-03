@@ -19,7 +19,7 @@ from ..models import Job
 from ..settings import get_settings
 from . import browser
 from .authority import domain_of
-from .web import BRAVE_URL, MAX_DOWNLOAD_BYTES, _clean, check_url, html_to_text
+from .web import BRAVE_URL, MAX_DOWNLOAD_BYTES, _clean, check_url, html_to_text, region_params
 
 LEDGER_TTL_S = 86400
 FETCH_CACHE_TTL_S = 86400
@@ -52,7 +52,7 @@ def query_blocked(query: str) -> str | None:
 async def search_web(query: str, *, count: int = 5, freshness: Freshness | None = None,
                      ledger_key: str) -> dict[str, Any]:
     """{query, hits[{url,title,snippet,domain,age}], error, cached, ledger}"""
-    args = {"q": query[:400], "count": count, "freshness": freshness}
+    args = {"q": query[:400], "count": count, "freshness": freshness, **region_params(query)}
     lkey = f"ledger:{ledger_key}:search:{_sha1(args)}"
     if hit := await _ledger_get(lkey):
         return {**hit, "ledger": True}

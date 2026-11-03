@@ -165,6 +165,22 @@ async def test_force_clarify_always_asks(make):
     assert snap.interrupts and snap.interrupts[0].value["question"] == "Which one?"
 
 
+async def test_force_clarify_without_a_real_question_does_not_ask(make):
+    # Seen live 2026-11-03: Qwen filled the string "null" and the owner was asked "null".
+    g, _, _ = make({"assess_ambiguity": {"ambiguous": False, "slot": None, "question_to_user": "null",
+                                         "options": [], "assumption_if_skipped": "null"}})
+    _, snap = await run(g, inp("please search first and then write the review", force_clarify=True))
+    assert not snap.interrupts and snap.values["budget"]["clarify_used"] == 0
+
+
+async def test_placeholder_question_falls_back_and_null_options_dropped(make):
+    g, _, _ = make({"assess_ambiguity": {"ambiguous": True, "question_to_user": "null",
+                                         "options": [None, "null", "NA"]}})
+    _, snap = await run(g, inp("how much is that one"))
+    assert snap.interrupts[0].value["question"] == "Could you tell me a bit more about what you mean?"
+    assert snap.interrupts[0].value["options"] == ["NA"]
+
+
 async def test_clarify_rounds_capped_then_answer_with_assumptions(make, policy):
     n = policy["clarify"]["max_rounds"]
     amb = [{"ambiguous": True, "question_to_user": f"Which {i}?", "assumption_if_skipped": "the latest model"}
@@ -462,6 +478,14 @@ async def test_cite_only_reads_primary_pages_first_and_cites_without_claim_check
     assert out["answer"]["verdict"] == "cited" and [c["n"] for c in out["answer"]["citations"]] == [1]
 
 
+async def test_cite_only_reads_taiwan_sources_before_mainland_china_but_after_primary(cite):
+    urls = ["https://k.sina.com.cn/a", "https://example.org/b", "https://udn.com/news/c", "https://www.cwa.gov.tw/d"]
+    web = Web(hits={"天氣": urls}, pages={u: "晴" for u in urls})
+    g, _, _ = cite({"plan_search": {"needs_web": True, "queries": [{"query": "台北 今天天氣"}]}, "compose": "晴 [1]."}, web)
+    await run(g, inp("今天天氣好嗎"))
+    assert web.fetches == ["https://www.cwa.gov.tw/d", "https://udn.com/news/c"]
+
+
 async def test_cite_only_no_search_for_chat_or_private(cite):
     g, llm, web = cite({"plan_search": {"needs_web": False}, "compose": "Hi!"})
     out, _ = await run(g, inp("hi"))
@@ -469,6 +493,28 @@ async def test_cite_only_no_search_for_chat_or_private(cite):
     g, llm, web = cite({"plan_search": PLAN, "compose": "Private answer."})
     out, _ = await run(g, inp("my salary vs OpenAI pricing", private=True))
     assert not web.searches and "plan_search" not in llm.calls
+
+
+async def test_always_search_ignores_needs_web_false_but_not_chitchat(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "always_search": True}}
+    web = Web(hits={"Sleepers": ["https://www.imdb.com/title/tt0117665/"]},
+              pages={"https://www.imdb.com/title/tt0117665/": "Sleepers (1996) Brad Pitt, Kevin Bacon"})
+    plan = {"needs_web": False, "entity": "Sleepers 1996 film", "queries": [{"query": "Sleepers 1996 cast imdb"}]}
+    g, llm, _ = make({"plan_search": plan, "compose": "A one-liner [1]."}, web, pol=pol)
+    out, _ = await run(g, inp("Sleepers\nfeedback: 星光熠熠\nwrite a review"))
+    assert web.searches and "Always search" in next(m for t, m in llm.seen if t == "plan_search")[0].content
+    assert out["answer"]["verdict"] == "cited"
+    g, llm, web = make({"plan_search": {"needs_web": False}, "compose": "Hi!"}, pol=pol)
+    await run(g, inp("hi", task_type="chitchat"))
+    assert not web.searches and "plan_search" not in llm.calls
+
+
+async def test_local_thinking_that_leaves_no_answer_is_retried_without_thinking(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "local_think_tasks": ["compose"]}}
+    g, llm, _ = make({"plan_search": {"needs_web": False},
+                      "compose": ["<think>weather... weather... (token budget ran out)", "Sunny today."]}, pol=pol)
+    out, _ = await run(g, inp("今天天氣好嗎"))
+    assert llm.calls.count("compose") == 2 and out["answer"]["text"].endswith("Sunny today.")
 
 
 async def test_cite_only_bad_citations_recompose_then_strip(cite):

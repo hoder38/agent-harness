@@ -29,6 +29,19 @@ def _entity_key(entity: str | None, table: dict[str, Any]) -> str | None:
     return None
 
 
+def region_rank(url: str, rules: dict[str, Any] | None = None) -> int:
+    """0 = Taiwan source, 1 = other, 2 = mainland-China source (authority.yaml `region`): the owner lives in
+    Taiwan, so among non-primary sources Taiwanese pages are read first and mainland ones last."""
+    rules = config.authority() if rules is None else rules
+    reg = rules.get("region") or {}
+    host = domain_of(url)
+    for rank, key in ((0, "first"), (2, "last")):
+        if any(host.endswith(s.lower()) for s in reg.get(f"{key}_suffixes") or []) \
+                or any(_matches(host, d) for d in reg.get(f"{key}_domains") or []):
+            return rank
+    return 1
+
+
 def classify(url: str, entity: str | None = None, rules: dict[str, Any] | None = None) -> tuple[str, str]:
     """(tier, reason) of `url` as a source for a claim about `entity`."""
     rules = config.authority() if rules is None else rules

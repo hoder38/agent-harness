@@ -199,6 +199,15 @@ def parse_json(text: str) -> Any:
         return None
 
 
+_PLACEHOLDERS = {"null", "none", "n/a", "undefined", "nil"}
+
+
+def _field(value: Any) -> str:
+    """A model JSON string field; JSON null and placeholder strings such as "null" become ""."""
+    text = "" if value is None else str(value).strip()
+    return "" if text.lower() in _PLACEHOLDERS else text
+
+
 def numbers_in(text: str) -> set[str]:
     text = _MONTH_RE.sub(lambda m: f" {_MONTHS.index((m.group(1) or m.group(2))[:3].lower()) + 1} ", text or "")
     out = set()
@@ -274,6 +283,8 @@ def build_grounded_graph(
     max_search = int(limits.get("web_search", 3))
     max_fetch = int(limits.get("fetch_page", 4))
     max_clarify = int((policy.get("clarify") or {}).get("max_rounds", 5))
+    always_search = bool(g_cfg.get("always_search"))
+    search_skip = set(g_cfg.get("search_skip_task_types") or ["chitchat"])
     max_claims = int(g_cfg.get("max_claims", 8))
     brave_usd = float(g_cfg.get("brave_usd_per_query", 0.0))
     judge_ttl = int(float(g_cfg.get("llm_authority_cache_days", 30)) * 86400)
@@ -341,11 +352,18 @@ def build_grounded_graph(
                 kw["max_tokens"] = max_tokens + think_tokens
             else:
                 kw["extra_body"] = {"think": False}
-        msg = await llm.bind(**kw).ainvoke(
-            [SystemMessage(f"TASK: {task}\n\n{system}"), *msgs], config={"tags": tags, "run_name": task})
+        prompt = [SystemMessage(f"TASK: {task}\n\n{system}"), *msgs]
+        msg = await llm.bind(**kw).ainvoke(prompt, config={"tags": tags, "run_name": task})
         um = getattr(msg, "usage_metadata", None) or {}
         budget["usd"] = round(budget["usd"] + (um.get("input_tokens", 0) * p_in + um.get("output_tokens", 0) * p_out) / 1e6, 6)
-        return _text(msg.content)
+        text = _text(msg.content)
+        if "extra_body" not in kw and s.get("model", "local") in LOCAL_MODELS \
+                and not re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S).strip():
+            # Thinking used the whole token budget and left no visible answer: retry once without thinking.
+            msg = await llm.bind(max_tokens=max_tokens, extra_body={"think": False}).ainvoke(
+                prompt, config={"tags": tags, "run_name": f"{task}_nothink"})
+            text = _text(msg.content)
+        return text
 
     def finish_segment(s: GroundedState, budget: dict) -> dict:
         budget["active_ms"] = active_ms(s)
@@ -425,9 +443,11 @@ def build_grounded_graph(
         except Exhausted:
             return {"budget": budget, **kb_state}
         data = parse_json(raw) or {}
-        ambiguous = bool(data.get("ambiguous")) or force
-        question = str(data.get("question_to_user") or "").strip()
-        assumption = str(data.get("assumption_if_skipped") or "").strip()
+        question = _field(data.get("question_to_user"))
+        assumption = _field(data.get("assumption_if_skipped"))
+        # A router-forced ask needs a real question: the model saying "not ambiguous" with no question (Qwen fills
+        # "null") would otherwise show "null" or a generic "tell me more" to the owner.
+        ambiguous = bool(data.get("ambiguous")) or (force and bool(question))
         asked_before = {re.sub(r"\W+", "", str(c.get("question") or "")) for c in s.get("clarifications") or []}
         if not ambiguous or (not force and re.sub(r"\W+", "", question) in asked_before):  # no loops
             return {"budget": budget, "pending_ask": None, **kb_state}
@@ -437,7 +457,8 @@ def build_grounded_graph(
         if not question:
             question = ("你指的是哪一個？可以再多說一點嗎？" if lang_of(s["question"]) == "zh"
                         else "Could you tell me a bit more about what you mean?")
-        options = [str(o)[:60] for o in (data.get("options") or []) if str(o).strip()][:3]
+        options = [str(o).strip()[:60] for o in data.get("options") or []
+                   if o is not None and str(o).strip().lower() not in ("", "null", "undefined")][:3]
         return {"budget": budget, **kb_state, "pending_ask": {"question": question[:500], "options": options,
                                                   "slot": str(data.get("slot") or "referent"),
                                                   "assumption": assumption}}
@@ -1111,15 +1132,29 @@ def build_grounded_graph(
         base = {"sources": kb_sources, "memories": mems}
         if private:
             return {"budget": budget, **base}
+        kb_sure_hit = any(float(so.get("score") or 0) >= kb_sure for so in kb_sources.values())
+        if always_search and (s.get("task_type") in search_skip or kb_sure_hit):
+            return {"budget": budget, **base}
         kb_note = ("\nThe owner's own documents already returned: "
                    + "; ".join(so["title"] for so in kb_sources.values())
-                   + ". If they are enough to answer, needs_web=false.") if kb_sources else ""
+                   + ". If they are enough to answer, needs_web=false.") if kb_sources and not always_search else ""
+        if always_search:
+            # Owner policy: always look things up (the local model's own knowledge of names, casts, links and
+            # dates was wrong too often), even for reviews, rewrites and advice about a named subject.
+            task = ("Plan a web search for the user's latest request. Always search: find facts about the subject "
+                    "(names, people, dates, plot, specifications, official pages) even when the request is creative "
+                    "writing, a review, a rewrite or advice. Give")
+        else:
+            task = ("Decide whether answering the user's latest request needs a web search (facts, numbers, dates, "
+                    "prices, versions, news, specifications, anything that may have changed). Greetings, creative "
+                    "writing, opinions, advice, maths and reasoning need none. If it does, give")
         sysmsg = (
-            f"{now_line()}\nDecide whether answering the user's latest request needs a web search (facts, "
-            "numbers, dates, prices, versions, news, specifications, anything that may have changed). Greetings, "
-            "creative writing, opinions, advice, maths and reasoning need none. If it does, give at most "
+            f"{now_line()}\n{task} at most "
             f"{min(max_search, 2)} search queries that find the official / primary source (use site:<domain> when the "
             "official domain is obvious). When unsure, search. freshness: pd|pw|pm|py for time-sensitive topics, else null.\n"
+            "The owner lives in Taiwan: for anything that depends on place (weather, prices, laws, shops, services, "
+            "local news) assume Taiwan unless another place is named, and write Chinese queries in Traditional "
+            "Chinese with Taiwanese terms.\n"
             "Reply with JSON only: {\"needs_web\": true|false, \"entity\": \"subject or null\", "
             "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}" + kb_note)
         try:
@@ -1130,11 +1165,11 @@ def build_grounded_graph(
             return {"budget": budget, **base}
         plan = parse_json(raw) or {}
         # The number/name heuristic overrides "no web" only when the owner's documents had nothing.
-        if not plan.get("needs_web") and (kb_sources or not _FACT_HINT.search(s["question"])):
+        if not always_search and not plan.get("needs_web") and (kb_sources or not _FACT_HINT.search(s["question"])):
             return {"budget": budget, **base}
         entity = str(plan.get("entity") or "").strip() or None
         queries = [q for q in plan.get("queries") or [] if isinstance(q, dict) and str(q.get("query") or "").strip()]
-        queries = queries or [{"query": s["question"][:200]}]
+        queries = queries or [{"query": (entity or s["question"])[:200]}]
         hits: dict[str, dict] = {}
         searched = []
         for q in queries[:max_search]:
@@ -1155,8 +1190,9 @@ def build_grounded_graph(
         for h in hits.values():
             tier, reason = auth.classify(h["url"], entity)
             if tier != auth.T3:
-                ranked.append((auth.TIER_RANK[tier], "official site" not in reason, len(ranked), h, tier, reason))
-        ranked.sort(key=lambda x: x[:3])
+                ranked.append((tier != auth.T1, auth.region_rank(h["url"]), auth.TIER_RANK[tier],
+                               "official site" not in reason, len(ranked), h, tier, reason))
+        ranked.sort(key=lambda x: x[:5])
         focus = [w for w in re.findall(r"[\w.+-]{3,}", s["question"])][:10] + re.findall(r"[\u3400-\u9fff]{2,6}", s["question"])[:6]
         sources: dict[str, dict] = dict(kb_sources)
         for *_, h, tier, reason in ranked:

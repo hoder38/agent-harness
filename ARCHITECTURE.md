@@ -181,6 +181,10 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
   `/help` list. Paths such as `/etc/hosts …` are not commands.
 - Secret/PII regex scan (API keys, tokens, private keys, ID numbers, card numbers, phone, email). Redact for any non-local use.
 - **Source tags:** content originating from mail, calendar, finance docs, `~/private`, personal notes ⇒ `privacy_tag=PRIVATE`.
+- **LINE is never PRIVATE (2026-10-30):** for `channel="line"` Gate 0 always returns no privacy tag (keywords, sources,
+  patterns and thread stickiness are ignored); secrets and PII are still redacted before any cloud call. Only web
+  threads can be PRIVATE. "Never send PRIVATE content to LINE" below therefore means content from PRIVATE *web*
+  threads (notices, approvals, reminders), which LINE receives only as content-free notices.
 - Budget check (daily $ per provider, Copilot AI credits).
 
 ### Gate 1 — Qwen privacy check (DEFERRED — not in initial build)
@@ -245,13 +249,16 @@ def decide(job, gate0, router, gpu_state, budget) -> Decision:
     # 2. PRIVATE  → model must be local
     #       if gpu_state == GAMING: routing = rule-based (§6, no model call);
     #       execution: interactive → local_cpu (warn, short answers); background → defer until FREE
-    # 3. intent confidence < 0.8 OR router.ambiguous > 0.7 → route="clarify" on a LOCAL model (local_cpu if GPU BUSY/GAMING);
+    # 3. intent confidence < 0.7 (`thresholds.clarify_below`) OR router.ambiguous > 0.7 → route="clarify" on a LOCAL model (local_cpu if GPU BUSY/GAMING);
     #    no tier bump — never pay a cloud model to ask a question. /cloud override and PRIVATE keep their model.
     #    The answer is re-routed together with the original request + question (§12a MVP), so the tier
-    #    (and any escalation) is decided once the intent is clear. After 5 clarify rounds → answer with assumptions.
+    #    (and any escalation) is decided once the intent is clear. After `clarify.max_rounds` (10) clarify rounds
+    #    → answer with stated assumptions.
     # 4. code_multi > 0.6 or long_ctx > 0.6 → cloud_strong (cloud_fast if over budget)
     # 5. gpu_state in (BUSY, GAMING) and model == local and not PRIVATE → cloud_fast
-    # 6. channel == "line" → prefer local/cloud_fast, short answer, no coding approvals inline
+    # 6. channel == "line" → route is always "chat" (assistant/coding/clarify become chat: LINE is chat + notify only,
+    #    todos/calendar/coding/approvals happen on the web); cloud_strong → cloud_fast; short plain-text answers.
+    #    The grounded graph can still ask its own clarifying question on LINE.
     # 7. mode == "background" → stricter budget, risky actions queued for approval
     # 8. budget exceeded → downgrade + notify
     # 9. video / large doc → queue="background"
@@ -267,22 +274,31 @@ class Decision(BaseModel):
     reasons: list[str]          # human-readable rule trail, shown in UI and logged
 ```
 
-Model aliases are defined in **LiteLLM** `config/litellm.yaml`; the harness only calls
-`http://litellm:4000/v1` with `model=<alias>`:
+Model aliases are defined in **LiteLLM** `config/litellm.yaml` (the file is the source of truth; summary below);
+the harness only calls `http://litellm:4000/v1` with `model=<alias>`. Model names come from `.env`
+(`LOCAL_MODEL`, `CLOUD_FAST_MODEL`, `CLOUD_STRONG_MODEL`; see `.env.example`):
 ```yaml
 model_list:
-  - model_name: local
-    litellm_params: { model: ollama_chat/qwen3.5:9b-q6_K, api_base: http://ollama:11434 }   # VERIFY tag
-  - model_name: local_cpu
-    litellm_params: { model: ollama_chat/qwen3.5:9b-q4_K_M, api_base: http://ollama:11434, num_gpu: 0 }
+  - model_name: local          # GPU; keep_alive 10m
+    litellm_params: { model: os.environ/LOCAL_MODEL, api_base: http://ollama:11434, keep_alive: 10m }  # ollama_chat/qwen3.5:9b (no q6_K tag upstream)
+  - model_name: local_cpu      # same model, CPU only (not a separate q4_K_M tag)
+    litellm_params: { model: os.environ/LOCAL_MODEL, api_base: http://ollama:11434, num_gpu: 0 }      # VERIFY num_gpu is forwarded
   - model_name: cloud_fast
-    litellm_params: { model: openai/<fill: fast model>, api_key: os.environ/OPENAI_API_KEY }
+    litellm_params: { model: os.environ/CLOUD_FAST_MODEL, api_key: os.environ/OPENAI_API_KEY }
   - model_name: cloud_strong
-    litellm_params: { model: anthropic/<fill: strong model>, api_key: os.environ/ANTHROPIC_API_KEY }
+    litellm_params: { model: os.environ/CLOUD_STRONG_MODEL, api_key: os.environ/ANTHROPIC_API_KEY }
 router_settings:
   fallbacks: [{ cloud_strong: [cloud_fast] }, { cloud_fast: [cloud_strong] }]   # never fall back to/from local here; privacy is decided upstream
-litellm_settings: { max_budget: <daily USD>, budget_duration: 1d }
+  num_retries: 2
+  timeout: 120
+litellm_settings:
+  drop_params: true
+  callbacks: litellm_hooks.proxy_handler_instance   # kill-switch backstop (config/litellm_hooks.py, §19)
+  max_budget: 10              # global daily USD hard cap (VERIFY)
+  budget_duration: 1d
+general_settings: { master_key: os.environ/LITELLM_MASTER_KEY }
 ```
+Thinking (`think`) and `max_tokens` are set per call by the harness, not in LiteLLM (§12a `local_think_tasks`).
 Privacy rule: LiteLLM fallbacks must never route a `local` request to a cloud model.
 The model is fixed for the duration of one agent loop; escalation starts a new loop.
 
@@ -592,7 +608,7 @@ PRIVATE threads never use web tools; they may cite only the local knowledge base
 
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:
-- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.8, or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (10, raised from 5 on 2026-10-28) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
+- **Clarify on local, escalate after:** decision rule 3 (§7) sends ambiguous requests (intent confidence < `clarify_below` 0.7 (0.8 until 2026-11-03), or Jev `ambiguous` > `thresholds.ambiguous` 0.7 — intent confidence alone misses vague referents like 「那個東西多少錢」, which scored 0.98) to `route=clarify` on `local` (`local_cpu` when the GPU is BUSY/GAMING). Redis `clarify:{thread_id}` (`{text, redacted_text, question, rounds}`, TTL `clarify.context_ttl_s`) makes the next message route as `request + [Assistant asked] … + [User answered] …`; the router's tier on that text decides any escalation. On PRIVATE threads the question is left out of the redacted copy. `clarify.max_rounds` (10, raised from 5 on 2026-10-28) → answer with stated assumptions. `clarify_rounds` is logged in `decisions.inputs` for replay.
 - **Confirm the task type (rule 3b, 2026-10-29):** when the top `task_type` probability < `thresholds.task_confirm_below` (0.7) or leads the second by < `thresholds.task_margin` (0.3), and one of the two is in `clarify.confirm_task_types` (`[shopping]`: only types that change the pipeline), `Decision.confirm_task` holds the two types and the grounded graph asks the owner to pick before anything else. Not asked on resumes, PRIVATE threads, non-chat routes or after `clarify.max_rounds`.
 - **Prompt rules:** `GROUNDING_WEB` (one primary source read with `fetch_page`, `[n]` citations, "(unverified)"/「（未驗證）」 labels, exempt kinds) or `GROUNDING_OFFLINE` (no invented sources; one "⚠️ 未驗證" line) on every non-clarify route; the clarify hint asks one question with ≤ 3 options.
 - **Tool caps:** `policy.yaml tool_limits` (`web_search: 3`, `fetch_page: 4`) per user turn; calls over the cap get an error `ToolMessage` without running.
@@ -757,10 +773,10 @@ grounding:
   llm_authority_cache_days: 30
   max_claims: 8                     # factual claims checked per turn; the rest are labelled unverified
   pending_ttl_s: 86400              # an unanswered clarifying question expires after this
-  local_think_tasks: []             # Qwen thinking per step on local; off (see Implementation notes)
-  local_think_tokens: 2048
+  local_think_tasks: [compose]      # Qwen thinking per step on local (see Implementation notes)
+  local_think_tokens: 4096
 executor:
-  recursion_limit: 60               # 5 clarify rounds ×2 + 3 research loops ×5 + fixed nodes ≈ 35
+  recursion_limit: 60               # max_rounds (10) clarify ×2 + 3 research loops ×5 + fixed nodes ≈ 45
 ```
 - Before each LLM call: `est = in_tokens_est·price_in + max_tokens·price_out` (`prices_usd_per_mtok`); skip to `compose` if `usd + est > max_usd·(1 − reserve)`. Actual usage is added afterwards.
 - Each node checks `active_ms + elapsed > (max_active_s − reserve.seconds)·1000`.
@@ -773,7 +789,17 @@ The owner found per-claim verification too heavy: 17–30 s per turn and long "U
 - **research:**
   - One LLM call returns `{needs_web, entity, queries ≤ 2}`.
   - Even if the model says no, the turn searches anyway when `_FACT_HINT` matches.
-  - It then searches, ranks hits by authority tier (rules only; rejected domains are dropped) and fetches up to `cite_pages` pages of `cite_chars` each.
+  - **`grounding.always_search: true` (owner decision 2026-11-03):** `needs_web` is ignored and every non-PRIVATE turn
+    searches, including reviews, rewrites and advice about a named subject (the 9B model's own casts, links and dates
+    were often wrong, and it judged such requests "creative writing"). Skipped only for `search_skip_task_types`
+    (`chitchat`) and when the owner's documents returned a hit ≥ `rag.skip_clarify_score`. With no planned query,
+    the planner's `entity` is searched.
+  - **Taiwan first (owner decision 2026-11-03):** the planner and `BASE_SYSTEM` assume Taiwan for place-dependent
+    questions and write Chinese queries in Traditional Chinese. Brave gets `country=TW` (`grounding.search_country`) and,
+    for Chinese queries, `search_lang=zh-hant` (`search_lang_cjk`); both search tools. Hits are fetched in the order
+    T1 → Taiwanese (`authority.yaml region.first_*`, `.tw`) → other → mainland-China (`region.last_*`, `.cn`, 163.com…),
+    then by tier. Before this, 「今天天氣好嗎」 searched 「中国今日天气」 and read sina/163 pages.
+  - It then searches, ranks hits as above (rules only; rejected domains are dropped) and fetches up to `cite_pages` pages of `cite_chars` each.
   - PRIVATE threads do no web access.
 - **compose:** answers with `[n]` after sentences taken from a source, and may use general knowledge without a number.
 - **final_check:** URL and `[n]` validity only (recompose once, then strip).
@@ -811,7 +837,7 @@ Deviations from, and details beyond, the design above:
   - Dotted versions (e.g. `3.12.0`) are kept as one number.
 - **Local Qwen (qwen3.5:9b):**
   - Every grounded call sends `think: false`, because with thinking on the model spends all of `max_tokens` on hidden reasoning and returns empty content.
-  - `grounding.local_think_tasks` re-enables thinking per step with `local_think_tokens` extra headroom, but [verify_support, compose] measured about 140 s per turn (over `max_active_s`) with empty answers, so it is `[]`.
+  - `grounding.local_think_tasks` re-enables thinking per step with `local_think_tokens` extra headroom. [verify_support, compose] measured about 140 s per turn (over `max_active_s`) with empty answers; since 2026-10-29 only `[compose]` (4096). If thinking still uses the whole budget and leaves no visible text (seen 2026-11-03: 5.7k tokens, LINE got only the 「我理解為」 header), `call()` retries once with `think: false`.
   - The draft and compose prompts state the answer language explicitly; the 9B model drifted to Chinese on "the user's language".
   - Claim rows are given to compose as `(true) … [n]` / `(false) … source [n] says` / `(unchecked) …`, so the model doesn't copy "VERIFIED" labels into the answer.
 - **Measured live (2026-10-28, local GPU):**
@@ -823,7 +849,7 @@ Deviations from, and details beyond, the design above:
 ### Tests (pytest + `GenericFakeChatModel` + `InMemorySaver` + `fakeredis`; monkeypatch `search_web`/`fetch_source`)
 | Area | Cases |
 |---|---|
-| Clarify | ambiguous referent → one interrupt with `slot=referent`; clear question → no interrupt; `route=clarify` always asks; 5 ambiguous rounds → no 6th interrupt, answer has assumptions; web resume merges answer into `question`; LINE next message resumes, Gate 0 runs, `/skip` works; PRIVATE clarify sends notice only on LINE; waiting 10 min (fake clock) not counted in `active_ms` |
+| Clarify | ambiguous referent → one interrupt with `slot=referent`; clear question → no interrupt; `route=clarify` asks when the model has a real question (no "null"/generic question, 2026-11-03); `clarify.max_rounds` ambiguous rounds → no further interrupt, answer has assumptions; web resume merges answer into `question`; LINE next message resumes, Gate 0 runs, `/skip` works; PRIVATE clarify sends notice only on LINE; waiting 10 min (fake clock) not counted in `active_ms` |
 | Authority | openai.com is T1 for OpenAI pricing, not for Anthropic pricing; only reuters/wikipedia → unverified and not cited; medium.com never fetched; redirect to rejected domain → rejected; unknown-domain LLM verdict cached (2nd call skips LLM) |
 | Support | quote not in excerpt → not verified; claim "$20" vs quote "$25" → `contradicted` with source's value; two T1 sources → one `[n]`; time-sensitive w/o date → fetched-date note; prompt injection in page does not change tiers or output |
 | Partial | 1 of 3 claims verified → `partial` with 2 reasons; greeting/creative only → no search, `exempt_only`; poem + one fact → only the fact needs a source; PRIVATE (KB missing) → no web calls, all facts unverified |
@@ -1077,7 +1103,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 1 | Compose skeleton: postgres, redis, ollama, **litellm**, **phoenix**, **egress-proxy**, agent-api; one ReAct chat graph; SSE; minimal React chat page in nodeReact | Chat streams tokens; thread survives agent-api restart; trace visible in Phoenix; non-allowlisted domain blocked |
 | 2 | Gate 0 + Jev router + decision layer (+ Qwen fallback router; Gate 1 stub only); `decisions` logging + replay tool | Unit tests for `decide()` cover every rule; Jev outage → fallback works |
 | 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
-| 4 | gpu-governor + Ollama unload — **implemented 2026-10-28** (§11; live GAMING test with `steam-headless` pending) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
+| 4 | gpu-governor + Ollama unload — **implemented 2026-10-28, live-verified 2026-11-03** (§11: real Moonlight sessions entered GAMING via NVENC on 11-02; forced GAMING unloaded Qwen + embeddings 8.4 → 0.4 GB in ~1 s and a web turn routed to `cloud_fast` by rule 5, embeddings on CPU) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
 | 5 | Coding route: sandbox-manager + Copilot (headless, not ACP) + verify + approval — **implemented 2026-10-28** (§9a; verified end-to-end, squid gate passed) | Task produces diff, harness-run tests pass, push blocked until approved (nothing is ever pushed; approval creates a local branch) |
 | 6 | Copilot ingest hooks + harness-memory MCP — **implemented 2026-10-30** (§9b; not yet run against a live SSH session) | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
 | 7 | Todos + Inbox + background approvals ✅ | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
@@ -1248,7 +1274,7 @@ were all seen live (web and LINE); the fixes are deterministic code around the m
 | Wrong or invented arguments (relative dates, "tomorrow+1 day", year 2023) | Tools take words and resolve them in code: `today/tomorrow/day after tomorrow/今天/明天/後天` + HH:MM, `MM/DD`, `MM月DD日`; bad values return "Not added: ..." rather than guessing | `todos.parse_due`, `gcal.when` |
 | Repeats the same call | Duplicate guards: identical todo within 10 min; identical open calendar proposal | `tools/todos.py`, `tools/calendar.py` |
 | Empty final message after a tool result | Reply with the last tool result of the turn | `worker._tool_fallback` |
-| Owner cannot see PRIVATE answers on LINE, so cannot tell what happened | The LINE notice is built from this turn's real tool results (added / proposed / failed / nothing happened / the assistant is asking you a question that must be answered on the web). No content and no URLs: it only names the page (Todos, Inbox) | `worker._private_line_notice` |
+| Owner cannot see PRIVATE answers on LINE, so cannot tell what happened (before LINE became never-PRIVATE; now applies to notices from PRIVATE web threads) | The LINE notice is built from this turn's real tool results (added / proposed / failed / nothing happened / the assistant is asking you a question that must be answered on the web). No content and no URLs: it only names the page (Todos, Inbox) | `worker._private_line_notice` |
 
 **Rule for new tools:** a tool that writes anything (todo, calendar, memory, later email) must (1) resolve user-facing
 values in code, (2) return a one-line result that starts with a stable prefix (`Added`, `Proposed`, `Not added`) so
@@ -1262,6 +1288,6 @@ the wrong place. A general model-based verifier for tool use belongs to phase 10
 local for PRIVATE text. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
 
 - **LINE is chat + notify only (2026-10-30):** `decision` rule 6 forces every LINE message to the `chat` route (no todo/calendar/coding tools; models stay local or cloud_fast). A clear add-todo/add-event phrasing on LINE is answered in code ("use the web") before any model runs (`pipeline._line_write_request`), so the model cannot claim it saved something. Todos, calendar and approvals are done on the web. `GET /threads` now returns `private`; the web chat list shows 🔒 and the header shows "Private · local only" for a locked thread (a new chat unlocks).
-- **LINE thread reset (2026-10-30):** the first LINE thread (`line:<uid>`) was locked PRIVATE with private history, so the owner asked for a clean start. `channels.line.thread_id()` now returns `line:<uid>:2`; the old thread is hidden and never sent anywhere. The web alias `line` maps to the new thread. Calendar keywords (行事曆/日曆/行程/calendar) still mark a message PRIVATE and lock the new thread again; the lock has no expiry (by decision).
+- **LINE thread reset (2026-10-30):** the first LINE thread (`line:<uid>`) was locked PRIVATE with private history, so the owner asked for a clean start. `channels.line.thread_id()` now returns `line:<uid>:2`; the old thread is hidden and never sent anywhere. The web alias `line` maps to the new thread. (Superseded the same day: calendar keywords no longer lock a LINE thread, see below.)
 
 **LINE is never PRIVATE.** `gate0(..., channel="line")` always returns no privacy tag (keywords, sources, patterns and thread stickiness are ignored); secrets and PII are still redacted before any cloud call. Web keeps the private tier.

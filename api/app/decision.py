@@ -65,7 +65,7 @@ def decide(
             model = "local"
 
     # 3. ambiguous intent → ask on a local model; the tier is decided once the intent is clear
-    conf_clarify = th.get("clarify_below", 0.8)
+    conf_clarify = th.get("clarify_below", 0.7)
     amb_th = th.get("ambiguous", 0.7)
     max_rounds = int((policy.get("clarify") or {}).get("max_rounds", 5))
     why = []

@@ -10,10 +10,22 @@ from urllib.parse import urlsplit
 import httpx
 from langchain_core.tools import tool
 
+from .. import config
 from ..settings import get_settings
 from . import browser
 
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+_CJK = re.compile(r"[\u3400-\u9fff]")
+
+
+def region_params(query: str) -> dict[str, str]:
+    """Brave locale for the owner (policy grounding.search_country / search_lang_cjk): Taiwan results first, and
+    Traditional-Chinese pages for Chinese queries (English queries keep Brave's language detection)."""
+    g = config.policy().get("grounding") or {}
+    out = {"country": str(g["search_country"])} if g.get("search_country") else {}
+    if g.get("search_lang_cjk") and _CJK.search(query):
+        out["search_lang"] = str(g["search_lang_cjk"])
+    return out
 MAX_PAGE_CHARS = 8000
 MAX_DOWNLOAD_BYTES = 2_000_000
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -95,7 +107,7 @@ async def web_search(query: str) -> str:
         try:
             r = await client.get(
                 BRAVE_URL,
-                params={"q": query[:400], "count": 5},
+                params={"q": query[:400], "count": 5, **region_params(query)},
                 headers={"X-Subscription-Token": key, "Accept": "application/json"},
             )
         except httpx.HTTPError as e:

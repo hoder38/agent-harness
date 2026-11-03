@@ -51,9 +51,11 @@ def no_db(monkeypatch):
 
 @pytest.fixture
 def policy():
-    """Real policy, with RAG/memory off so graph tests never reach Postgres/Ollama (tests inject kb/recall)."""
+    """Real policy, with RAG/memory off so graph tests never reach Postgres/Ollama (tests inject kb/recall), and
+    grounding.always_search off so graphs without a stubbed `search` never reach the real web search."""
     from app import config
 
     pol = config.policy()
     return {**pol, "rag": {**(pol.get("rag") or {}), "enabled": False},
-            "memory": {**(pol.get("memory") or {}), "enabled": False}}
+            "memory": {**(pol.get("memory") or {}), "enabled": False},
+            "grounding": {**(pol.get("grounding") or {}), "always_search": False}}

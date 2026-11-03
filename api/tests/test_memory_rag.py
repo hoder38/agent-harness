@@ -198,7 +198,7 @@ def kbgraph(redis, policy):
 
     pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "cite_pages": 1}}
 
-    def _make(script, web=None, hits=(KB_HIT,), mems=()):
+    def _make(script, web=None, hits=(KB_HIT,), mems=(), always_search=False):
         llm = TaskLLM(script=script, calls=[], seen=[])
         web = web or Web()
         kb = KB(list(hits))
@@ -206,7 +206,8 @@ def kbgraph(redis, policy):
         async def recall(query, *, private):
             return [dict(m) for m in mems]
 
-        g = build_grounded_graph(llm, policy=pol, checkpointer=InMemorySaver(), search=web.search, fetch=web.fetch,
+        g = build_grounded_graph(llm, policy={**pol, "grounding": {**pol["grounding"], "always_search": always_search}},
+                                 checkpointer=InMemorySaver(), search=web.search, fetch=web.fetch,
                                  kb=kb, recall=recall, clock=Clock())
         return g, llm, web, kb
     return _make
@@ -246,6 +247,17 @@ async def test_kb_answer_skips_web_unless_needed_and_chitchat_skips_kb(kbgraph):
     g, llm, web, kb = kbgraph({"plan_search": {"needs_web": False}, "compose": "Hi!"})
     out, _ = await run(g, inp("hi there", task_type="chitchat"))
     assert kb.calls == [] and out["answer"]["verdict"] == "no_sources"
+
+
+async def test_always_search_still_skips_web_when_documents_are_sure(kbgraph):
+    g, llm, web, _ = kbgraph({"plan_search": PLAN, "compose": "From notes [1]."}, always_search=True)
+    await run(g, inp("What does the governor do when gaming starts?"))
+    assert not web.searches and "plan_search" not in llm.calls
+    weak = {**KB_HIT, "score": 0.1}
+    g, llm, web, _ = kbgraph({"plan_search": {"needs_web": False, "queries": [{"query": "gpu governor"}]},
+                              "compose": "x"}, hits=[weak], always_search=True)
+    await run(g, inp("What does the governor do when gaming starts?"))
+    assert web.searches == ["gpu governor"]
 
 
 async def test_kb_is_searched_once_before_clarifying(kbgraph):

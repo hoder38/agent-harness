@@ -29,3 +29,9 @@ github_orgs:           # github.com/<org> is T1 only for these entities
   NVIDIA: [NVIDIA]
 secondary_domains: [reuters.com, apnews.com, cna.com.tw, wikipedia.org, bbc.com, bloomberg.com]
 reject_patterns: [medium.com, reddit.com, quora.com, stackoverflow.com, "*.blogspot.com", zhihu.com, pinterest.com]
+# The owner lives in Taiwan: after primary (T1) sources, read Taiwanese pages first and mainland-China pages last.
+region:
+  first_suffixes: [".tw"]
+  first_domains: [udn.com, ettoday.net, setn.com, storm.mg, ptt.cc, mobile01.com, twreporter.org, thenewslens.com]
+  last_suffixes: [".cn"]
+  last_domains: [163.com, qq.com, sohu.com, baidu.com, csdn.net, bilibili.com, toutiao.com, 360doc.com, ifeng.com, douban.com]

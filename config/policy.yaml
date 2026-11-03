@@ -1,9 +1,9 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-05.2
+version: 2026-11-05.5
 
 thresholds:
-  clarify_below: 0.8      # intent confidence < this -> route=clarify on a local model (no tier bump)
+  clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
   ambiguous: 0.7          # router `ambiguous` (unclear referent) above this -> route=clarify (same handling)
   heavy: 0.6              # code_multi / long_ctx above this -> cloud_strong
   risky: 0.5              # router risky above this -> risky=True
@@ -28,6 +28,13 @@ grounding:
   # cite_only (default): clarify -> search -> read cite_pages pages -> answer with [n] citations; no per-claim
   #   checks or "Unverified" list. verify: full §12a claim verification (slower, noisier on the 9B model).
   mode: cite_only
+  # Brave locale (both search tools): country=TW always; search_lang only for queries containing Chinese. 2026-11-03.
+  search_country: TW
+  search_lang_cjk: zh-hant
+  # cite_only: search the web on every non-private turn (the model no longer decides needs_web), except
+  # search_skip_task_types and turns the owner's documents already answer (rag.skip_clarify_score). 2026-11-03.
+  always_search: true
+  search_skip_task_types: [chitchat]
   cite_pages: 2                     # pages read per turn (also capped by tool_limits.fetch_page)
   cite_chars: 4000                  # excerpt chars per page given to the model
   per_turn: { max_usd: 0.05, max_active_s: 90 }
