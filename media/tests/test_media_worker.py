@@ -129,6 +129,13 @@ def test_shelf_prices_pair_with_the_nearest_sized_product():
         return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
     items = [(b(0, 0), "秋元水產-薄削柴魚片25G"), (b(60, 50, 120, 60), "IZO"),
              (b(1000, 0), "日本丸友-德用柴魚片45G"), (b(1100, 50, 80, 60), "98"),
-             (b(0, 500), "25g"), (b(2000, 900, 80, 40), "350")]
+             (b(0, 500), "25g"), (b(2000, 900, 80, 40), "350"), (b(320, 0, 80, 30), "1615")]
     assert image.price_pairs(items) == ["秋元水產-薄削柴魚片25G — 120(辨識為「IZO」)",
                                         "日本丸友-德用柴魚片45G — 98"]
+
+
+@pytest.mark.parametrize("line,want", [("冲绳限定冲泡即用海带芽85G", "沖繩限定沖泡即用海帶芽85G"),
+                                       ("日本丸友-德用经柴魚片", "日本丸友-德用經柴魚片"),
+                                       ("干物", "干物"), ("国内製造", "国内製造"), ("かつお荒节使用", "かつお荒节使用")])
+def test_ocr_lines_turn_traditional_only_when_plainly_simplified_chinese(line, want):
+    assert image._trad(line) == want

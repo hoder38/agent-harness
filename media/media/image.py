@@ -55,11 +55,34 @@ def _ocr_boxes(img: Image.Image) -> list:
 
     with _ocr_lock:
         if _ocr is None:
-            from rapidocr_onnxruntime import RapidOCR
-            _ocr = RapidOCR()
-        res, _ = _ocr(np.array(img)[:, :, ::-1])   # BGR like OpenCV
-    return [(box, text.strip() if KANA_RE.search(text) else common.to_trad(text.strip(), "s2tw"))
-            for box, text, score in res or [] if float(score) >= 0.5 and text.strip()]
+            from rapidocr import ModelType, OCRVersion, RapidOCR
+            v = OCRVersion.PPOCRV6   # one model for Simplified, Traditional, Japanese and English (baked in the image)
+            _ocr = RapidOCR(params={"Global.log_level": "warning", "Det.ocr_version": v, "Rec.ocr_version": v,
+                                    "Det.model_type": ModelType.SMALL, "Rec.model_type": ModelType.SMALL})
+        res = _ocr(np.array(img)[:, :, ::-1])   # BGR like OpenCV
+    if res.boxes is None:
+        return []
+    return [(box.tolist(), _trad(text.strip())) for box, text, score in zip(res.boxes, res.txts, res.scores)
+            if float(score) >= 0.5 and text.strip()]
+
+
+def _simplified_only(c: str) -> bool:
+    """A Simplified form that Japanese never uses (绳, 经, 带), unlike shared kanji such as 干, 国, 冲."""
+    if common.to_trad(c, "s2t") == c:
+        return False
+    try:
+        c.encode("shift_jis")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
+def _trad(line: str) -> str:
+    """The model prints what it sees, but drifts to Simplified on Chinese labels: convert only lines that are
+    plainly Simplified Chinese, so Japanese (干物, 国内製造) stays as printed."""
+    if KANA_RE.search(line) or not any(_simplified_only(c) for c in line):
+        return line
+    return common.to_trad(line, "s2tw")
 
 
 def _rows(items: list) -> str:
@@ -88,7 +111,8 @@ def _rect(box: list) -> tuple[float, float, float, float]:
 
 def price_pairs(items: list) -> list[str]:
     """Shelf labels: pair each product line that states a size (25G, 500ml…) with the nearest bare price box,
-    one-to-one by the gap between the boxes, so prices stop floating free of their products in the flat rows."""
+    one-to-one by the gap between the boxes, so prices stop floating free of their products in the flat rows.
+    Shelf-tag prices are printed bigger than the product line, which keeps small package numbers out."""
     names, prices = [], []
     for box, text in items:
         r = _rect(box)
@@ -102,6 +126,8 @@ def price_pairs(items: list) -> list[str]:
     for i, (nr, _) in enumerate(names):
         h = nr[3] - nr[1] or 1
         for j, (pr, _) in enumerate(prices):
+            if pr[3] - pr[1] < h * 1.2:
+                continue
             gap = math.hypot(max(nr[0] - pr[2], pr[0] - nr[2], 0), max(nr[1] - pr[3], pr[1] - nr[3], 0))
             if gap <= h * 6:
                 cands.append((gap, i, j))

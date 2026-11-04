@@ -53,7 +53,7 @@ Modalities: **text, voice, image, video, documents**.
 | Keyword search | `pg_trgm` (or ParadeDB `pg_search` for BM25 + CJK) |
 | Doc parsing | Docling |
 | ASR | faster-whisper large-v3-turbo (chosen, phase 9); OpenCC → Traditional Chinese |
-| OCR | RapidOCR (PaddleOCR models on onnxruntime, phase 9) |
+| OCR | RapidOCR 3.x, PP-OCRv6 small (one model: Simplified, Traditional, Japanese, English; onnxruntime CPU, baked into the image) |
 | Video | ffmpeg (audio extract + scene keyframes) |
 | File storage | Plain volume `/srv/agent/files/<sha256[:2]>/<sha256>` + Postgres `attachments` metadata (S3 later only if needed) |
 | LLM gateway | **LiteLLM proxy** — single endpoint for Ollama / OpenAI / Anthropic (keys, budgets, retries, fallback, cost log) |
@@ -228,10 +228,15 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
     re-encoded at `image.cloud_max_side` 2048 px without EXIF, at most `image.max_images`, built at call time so
     no base64 reaches checkpoints). Local tiers and PRIVATE runs get text only; `image.send_to_cloud: false` turns it off.
   - *Price pairing.* OCR keeps the boxes. Each line stating a size (25G, 500ml…) is paired one-to-one with the
-    nearest bare price box. Look-alike digits on price-tag fonts are mapped and flagged ("IZO" → 120). The pairs
-    go in a 【標價配對】 section, so local-only runs can read them too.
-  - OCR text goes through OpenCC s2tw, except lines with kana. The caption prompt says not to add currency, units
-    or brands that aren't visible (it had written 日元).
+    nearest bare price box that is printed bigger than the product line (shelf tags; keeps package numbers out).
+    Look-alike digits are mapped and flagged ("IZO" → 120) as a fallback. The pairs go in a 【標價配對】 section,
+    so local-only runs can read them too.
+  - OCR switched from RapidOCR 1.4 (PP-OCRv4 Chinese, mostly Simplified, misread kana and price digits) to
+    RapidOCR 3.x PP-OCRv6 small, which prints Japanese and Traditional as seen. It is 0.5 s on the shelf photo
+    and the models are baked in at build time. A line is converted with s2tw only if it has no kana and contains
+    a Simplified-only character that Japanese never uses (not encodable in Shift-JIS: 绳, 经, 带), so 干物 and
+    国内製造 stay as printed. The caption prompt says not to add currency, units or brands that aren't visible
+    (it had written 日元).
   - Rule 3b: with attachments, a near-tie between task types is not asked. The type that answers from the
     files wins over a web pipeline (shopping 0.46 vs factual 0.35 → factual).
   - Re-run: correct (45 g / 98 → about 2.18 per gram), `cloud_fast`, verify 0.77, $0.0008, 14 s, no question asked.

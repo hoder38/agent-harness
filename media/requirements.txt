@@ -8,7 +8,8 @@ pillow-heif>=0.18
 faster-whisper>=1.1
 nvidia-cublas-cu12
 nvidia-cudnn-cu12==9.*
-rapidocr_onnxruntime>=1.4,<1.5
+rapidocr>=3.10,<4
+onnxruntime>=1.18
 opencc-python-reimplemented>=0.1.7
 docling>=2.30
 pypdfium2>=4
