@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-05.8
+version: 2026-11-06.1
 
 thresholds:
   clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -156,10 +156,46 @@ queues:
   interactive: { name: "arq:interactive", timeout_s: 300 }
   background: { name: "arq:background", timeout_s: 3600 }   # coding: Copilot + tests + 1 retry
   coding: { name: "arq:background", timeout_s: 3600 }       # phase 5 coding graph (§9a); same worker as background
-  media: { name: "arq:background", timeout_s: 1800 }
+  media: { name: "arq:media", timeout_s: 3600 }           # phase 9 media-worker (§5): extraction only
   ingest: { name: "arq:background", timeout_s: 1800 }       # phase 6 Copilot session ingest (§9b)
 
 heavy_media_kinds: [video, large_doc]
+
+# Phase 9 (§5 L2): attachments → text in the media-worker, then the normal pipeline (as <untrusted> data).
+media:
+  max_mb: { web: 50, line: 100 }      # LINE's own cap is 300 MB for files; videos are shorter in practice
+  max_chars: 8000                     # attachment text in the model prompt (split over the files; rest truncated)
+  router_chars: 1200                  # cap for a voice note used as the message (router sees no file content)
+  voice_as_message_s: 120             # a voice note this short (or any LINE voice) with no typed text IS the request
+  max_jobs: 2
+  vision_model: qwen3.5:9b            # Ollama; vision verified (§17)
+  default_prompts:                    # when only a file is sent
+    image: 請說明這張圖片的內容。
+    video: 請摘要這段影片的內容。
+    doc: 請摘要這份文件。
+    large_doc: 請摘要這份文件的重點。
+    voice: 請整理這段錄音的重點。
+    mixed: 請說明這些附件的內容。
+  asr:
+    model: large-v3-turbo             # faster-whisper; CUDA fp16 while FREE, CPU int8 otherwise
+    cpu_threads: 8
+    beam_size: 5
+    initial_prompt: 以下是繁體中文的句子。
+    keep_alive_s: 300                 # unload after this idle time, or at once when gpu_state leaves FREE
+  image:
+    max_side: 1280                    # downscale before the vision model (EXIF always stripped)
+    when_gpu_busy: ocr_only           # ocr_only | cloud (NORMAL files only, kill switch off, budget left)
+    cloud_model: cloud_fast
+  video:
+    max_frames: 16
+    scene: 0.3                        # ffmpeg scene-change threshold for keyframes
+    max_s: 10800
+  doc:
+    large_pages: 20                   # more pages (or large_chars) → large_doc: background + knowledge base
+    large_chars: 40000
+    docling_max_pages: 50             # longer PDFs use plain page text (fast)
+    scanned_chars_per_page: 30        # below this a PDF counts as scanned → RapidOCR
+    ocr_max_pages: 30
 defer_recheck_s: 300
 gpu_concurrency: 2
 

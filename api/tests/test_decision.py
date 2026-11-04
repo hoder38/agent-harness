@@ -92,6 +92,11 @@ def test_clarify_cap_answers_with_router_tier(policy):
     assert any("assumptions" in x for x in out.reasons)
 
 
+def test_attachments_are_never_clarified(policy):
+    out = d(policy, j=job(attachments=[AttachmentRef(id="a", kind="image")]), r=rr(intent_confidence=0.5))
+    assert out.route == "chat" and any("attachments are the subject" in x for x in out.reasons)
+
+
 # 4. heavy
 @pytest.mark.parametrize("field", ["code_multi", "long_ctx"])
 def test_heavy_goes_strong(policy, field):

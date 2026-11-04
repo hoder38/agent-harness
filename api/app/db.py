@@ -157,6 +157,8 @@ async def open_db() -> AsyncConnectionPool:
             await conn.execute(SCHEMA, prepare=False)
             from .rag.store import SCHEMA as RAG_SCHEMA  # late import: rag.store imports db
             await conn.execute(RAG_SCHEMA, prepare=False)
+            from .media import SCHEMA as MEDIA_SCHEMA
+            await conn.execute(MEDIA_SCHEMA, prepare=False)
             from . import memory
             await memory.open_store(pool)
         finally:

@@ -3,7 +3,9 @@ import base64
 import hashlib
 import hmac
 import logging
+import asyncio
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -62,3 +64,23 @@ async def deliver(to: str, text: str, reply_token: str | None, reply_ts: float |
             log.info("LINE reply failed (%s); falling back to push", e)
     await push(to, text)
     return "push"
+
+
+async def content(message_id: str, max_bytes: int, *, wait_s: float = 60) -> AsyncIterator[bytes]:
+    """Stream a media message's content. LINE answers 202 while a video/audio is still being prepared."""
+    s = get_settings()
+    headers = {"Authorization": f"Bearer {s.line_channel_access_token}"}
+    url = f"{s.line_data_api_base}/v2/bot/message/{message_id}/content"
+    deadline = time.monotonic() + wait_s
+    async with httpx.AsyncClient(timeout=60) as c:
+        while True:
+            async with c.stream("GET", url, headers=headers) as r:
+                if r.status_code == 202 and time.monotonic() < deadline:
+                    await asyncio.sleep(3)
+                    continue
+                r.raise_for_status()
+                if int(r.headers.get("content-length") or 0) > max_bytes:
+                    raise ValueError("file too large")
+                async for chunk in r.aiter_bytes(65536):
+                    yield chunk
+                return

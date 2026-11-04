@@ -4,7 +4,8 @@ name: agent-harness
 # + phase 5 coding route: sandbox-manager, socket-proxy-rw, sandbox image (§9a).
 # + phase 10 RAG + memory: reranker (CPU cross-encoder), docs folder mounted read-only at /docs (§10).
 # + phase 6 Copilot ingest + harness-memory MCP: host Copilot session-state mounted read-only at /copilot-sessions (§9b/§9c).
-# Later phases add media-worker and syncthing.
+# + phase 9 media-worker (§5): uploads in /srv/agent/files, extraction on queue arq:media.
+# Later phases add syncthing.
 
 x-proxy-env: &proxy-env
   HTTP_PROXY: http://egress-proxy:4750
@@ -39,6 +40,7 @@ x-app-env: &app-env
   OLLAMA_URL: http://ollama:11434
   RERANKER_URL: http://reranker:8300
   DOCS_ROOT: /docs
+  FILES_ROOT: /files
   TZ: Asia/Taipei
 
 x-app: &app
@@ -50,6 +52,7 @@ x-app: &app
     - ${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro
     - ${COPILOT_SESSIONS_DIR:-/home/hoder/.copilot/session-state}:/copilot-sessions:ro   # phase 6 ingest (§9b)
     - ${GOOGLE_DIR:-/home/hoder/.config/harness/google}:/google:ro   # phase 7b Calendar grant (host/google_auth.py)
+    - ${FILES_DIR:-/srv/agent/files}:/files                  # phase 9 uploads (§5), sha256-named
   restart: unless-stopped
   networks: [agent]
   depends_on:
@@ -78,7 +81,7 @@ services:
       retries: 3
       start_period: 30s
 
-  agent-worker-bg:                           # background / coding / media queue
+  agent-worker-bg:                           # background / coding queue (+ answers about video / large docs)
     <<: *app
     command: ["arq", "worker.BackgroundSettings"]
     healthcheck:
@@ -127,6 +130,14 @@ services:
     image: agent-harness-api:test
     environment: { POLICY_PATH: /config/policy.yaml, PRIVACY_RULES_PATH: /config/privacy_rules.yaml, TZ: Asia/Taipei }
     volumes: ["./api:/app", "./config:/config:ro"]
+    network_mode: none
+
+  media-test:                                # tests only: docker compose run --rm media-test
+    profiles: [test]
+    build: { context: ./media, target: test }
+    image: agent-harness-media:test
+    environment: { POLICY_PATH: /config/policy.yaml, TZ: Asia/Taipei }
+    volumes: ["./media:/srv", "./config:/config:ro"]
     network_mode: none
 
   ollama:
@@ -260,6 +271,41 @@ services:
       retries: 3
       start_period: 600s                     # first start downloads ~2.3 GB
 
+  media-worker:                              # phase 9 (§5): voice/image/doc/video → text, queue arq:media
+    build: { context: ./media, target: runtime }
+    image: agent-harness-media:latest
+    command: ["arq", "media.worker.Settings"]
+    environment:
+      <<: *proxy-env
+      DATABASE_URL: postgresql://agent:${POSTGRES_PASSWORD:?}@agent-postgres:5432/agent
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@agent-redis:6379/0
+      POLICY_PATH: /config/policy.yaml
+      OLLAMA_URL: http://ollama:11434
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?}
+      FILES_ROOT: /files
+      TZ: Asia/Taipei
+    volumes:
+      - ./config:/config:ro
+      - ${FILES_DIR:-/srv/agent/files}:/files:ro
+      - media-models:/models                 # whisper + Docling models, downloaded via squid on first use
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }
+    cpus: 8
+    mem_limit: 12g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [agent]
+    depends_on:
+      agent-postgres: { condition: service_healthy }
+      agent-redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "arq", "--check", "media.worker.Settings"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
   socket-proxy-ro:                           # read-only Docker API for the health watcher and gpu-governor
     image: tecnativa/docker-socket-proxy:latest
     environment: { CONTAINERS: "1", EVENTS: "1", POST: "0" }
@@ -309,7 +355,7 @@ services:
     restart: unless-stopped
     networks: [dockerctl]
 
-volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {}, hf: {} }
+volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {}, hf: {}, media-models: {} }
 
 networks:
   agent: { internal: true }

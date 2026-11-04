@@ -30,12 +30,14 @@ class Settings(BaseSettings):
     line_channel_access_token: str = ""
     line_owner_user_id: str = ""
     line_api_base: str = "https://api.line.me"
+    line_data_api_base: str = "https://api-data.line.me"   # message content (images, audio, files)
 
     docker_host: str = "http://socket-proxy-ro:2375"
     ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING; RAG embeddings
     reranker_url: str = ""                             # §10 CPU cross-encoder; empty = RRF order only
     google_credentials_path: str = "/google/calendar.json"   # host-only OAuth grant (host/google_auth.py), mounted ro
     docs_root: str = "/docs"                           # §10 read-only docs folder indexed for RAG
+    files_root: str = "/files"                         # §5 uploads: /srv/agent/files/<sha[:2]>/<sha> on the host
     copilot_sessions_dir: str = "/copilot-sessions"    # §9b host ~/.copilot/session-state, read-only
     compose_project: str = "agent-harness"
 

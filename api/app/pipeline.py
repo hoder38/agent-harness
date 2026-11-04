@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from . import config, db, inbox, memory, state
+from . import config, db, inbox, media, memory, state
 from .decision import decide
 from .gates.gate0 import gate0
 from .gates.gate1_qwen import gate1
@@ -116,21 +116,25 @@ def _line_write_request(text: str) -> bool:
     return required_tool([SimpleNamespace(name="add_todo"), SimpleNamespace(name="add_event")], t) is not None
 
 
-async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None = None) -> SubmitResult:
+async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None = None, run_id: str | None = None,
+                 router_text: str | None = None) -> SubmitResult:
+    """`run_id`: a run accepted (and deduplicated) earlier, e.g. after its attachments were extracted (§5).
+    `router_text`: shorter text for routing and thread context when job.text carries long attachment content."""
     r = state.get_redis()
-    if not await state.dedupe(r, job.dedupe_key):
+    if run_id is None and not await state.dedupe(r, job.dedupe_key):
         return SubmitResult(duplicate=True)
 
     pending = await state.get_pending(r, job.thread_id)
-    skip = bool(_SKIP_RE.match(job.text or ""))
+    own = media.strip_blocks(job.text) if job.attachments else (job.text or "")   # never the files' text
+    skip = bool(_SKIP_RE.match(own))
     if skip and not pending:
         return SubmitResult(command_reply="Nothing to skip: no question is waiting for an answer.")
-    if not skip and (fact := memory.parse_remember(job.text or "")) is not None:
+    if not skip and (fact := memory.parse_remember(own)) is not None:
         return SubmitResult(command_reply=await _remember(job, fact))
-    if not skip and (reply := await handle_command(job.text or "", source=job.channel)):
+    if not skip and (reply := await handle_command(own, source=job.channel)):
         return SubmitResult(command_reply=reply)
 
-    if not skip and job.channel == "line" and not pending and _line_write_request(job.text or ""):
+    if not skip and job.channel == "line" and not pending and _line_write_request(own):
         return SubmitResult(command_reply="LINE 只能聊天和收通知,不能新增待辦或行事曆。請到網頁用同樣的句子操作。")
 
     t0 = time.monotonic()
@@ -146,21 +150,24 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     private = g0.privacy_tag == "PRIVATE"
     if private:
         await state.mark_thread_private(r, job.thread_id)
+    # Short form (attachments cut down) for the router, thread context and the decision log.
+    gr = g0 if router_text is None else gate0(Job(**{**job.model_dump(), "text": router_text}),
+                                              config.privacy_rules(), thread_private=private, channel=job.channel)
 
-    router_text, router_redacted = g0.text, g0.redacted_text
+    router_text, router_redacted = gr.text, gr.redacted_text
     clarify_cfg = pol.get("clarify") or {}
     clarify_ctx = await state.get_clarify_ctx(r, job.thread_id)
     clarify_rounds = clarify_ctx["rounds"] if clarify_ctx else 0
     prev = None if clarify_ctx else await state.get_prev_msg(r, job.thread_id)
     if prev:
-        router_text = f"[Previous message] {prev['text']}\n[Current message] {g0.text}"
-        router_redacted = f"[Previous message] {prev['redacted_text']}\n[Current message] {g0.redacted_text}"
+        router_text = f"[Previous message] {prev['text']}\n[Current message] {gr.text}"
+        router_redacted = f"[Previous message] {prev['redacted_text']}\n[Current message] {gr.redacted_text}"
     if clarify_ctx:
-        router_text = _with_clarification(clarify_ctx["text"], clarify_ctx.get("question"), g0.text)
+        router_text = _with_clarification(clarify_ctx["text"], clarify_ctx.get("question"), gr.text)
         # On PRIVATE threads the model saw unredacted text, so its question stays out of the redacted copy.
         router_redacted = _with_clarification(clarify_ctx["redacted_text"],
                                               None if private else clarify_ctx.get("question"),
-                                              g0.redacted_text)
+                                              gr.redacted_text)
 
     router = await route(
         text=router_text, redacted_text=router_redacted, private=private,
@@ -170,7 +177,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     corr_th = (pol.get("thresholds") or {}).get("correction", 0.6)
     if prev and not pending and router.correction > corr_th:
         # The owner says the last reply misread them: classify both messages as one request, from scratch.
-        corrected = {"text": f"{prev['text']}\n{g0.text}", "redacted_text": f"{prev['redacted_text']}\n{g0.redacted_text}"}
+        corrected = {"text": f"{prev['text']}\n{gr.text}", "redacted_text": f"{prev['redacted_text']}\n{gr.redacted_text}"}
         first = router
         router = await route(
             text=corrected["text"], redacted_text=corrected["redacted_text"], private=private,
@@ -200,29 +207,29 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     elif decision.route == "clarify":
         # A first clarify keeps just this message (not the previous-message prefix); later rounds keep the exchange.
         await state.set_clarify_ctx(r, job.thread_id,
-                                    text=router_text if clarify_ctx else g0.text,
-                                    redacted_text=router_redacted if clarify_ctx else g0.redacted_text,
+                                    text=router_text if clarify_ctx else gr.text,
+                                    redacted_text=router_redacted if clarify_ctx else gr.redacted_text,
                                     rounds=clarify_rounds + 1,
                                     ttl_s=int(clarify_cfg.get("context_ttl_s", 86400)))
     elif clarify_ctx:
         await state.clear_clarify_ctx(r, job.thread_id)
     if not pending:
-        latest = corrected or {"text": g0.text, "redacted_text": g0.redacted_text}
+        latest = corrected or {"text": gr.text, "redacted_text": gr.redacted_text}
         await state.set_prev_msg(r, job.thread_id, text=latest["text"], redacted_text=latest["redacted_text"],
                                  ttl_s=int(clarify_cfg.get("previous_ttl_s", 3600)))
     latency = int((time.monotonic() - t0) * 1000)
 
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
     await db.log_decision(
         job_id=job.id, run_id=run_id, thread_id=job.thread_id, channel=job.channel, mode=job.mode,
-        redacted_text=g0.redacted_text,
+        redacted_text=gr.redacted_text,
         inputs={
             "job": job.model_dump(mode="json", exclude={"text"}),
             "gate0": g0.model_dump(mode="json", exclude={"text"}),
             "gpu_state": gpu, "budget": budget.model_dump(), "killswitch": ks,
             "clarify_rounds": clarify_rounds,
             **({"resume_of": pending["run_id"]} if pending else {}),
-            **({"router_text": router_redacted} if router_redacted != g0.redacted_text else {}),
+            **({"router_text": router_redacted} if router_redacted != gr.redacted_text else {}),
             **({"correction_text": corrected["redacted_text"]} if corrected else {}),
         },
         router=router.model_dump(mode="json"), policy_version=str(pol.get("version")),

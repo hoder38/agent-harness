@@ -76,6 +76,8 @@ def decide(
     if why and "route" not in locked:
         if resuming:
             reasons.append(f"3: {' & '.join(why)} but this answers the graph's question → the graph decides")
+        elif job.attachments:
+            reasons.append(f"3: {' & '.join(why)} but the attachments are the subject → answer")
         elif clarify_rounds >= max_rounds:
             reasons.append(f"3: {' & '.join(why)} but {clarify_rounds} clarify rounds used "
                            "→ answer with stated assumptions")

@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .. import state as rstate
+from ..media import display_text as media_display
 from ..gates.jev_router import TASK_LABELS
 from ..memory import as_prompt as memory_prompt
 from ..models import LOCAL_MODELS
@@ -283,7 +284,7 @@ def build_grounded_graph(
     max_search = int(limits.get("web_search", 3))
     max_fetch = int(limits.get("fetch_page", 4))
     max_clarify = int((policy.get("clarify") or {}).get("max_rounds", 5))
-    always_search = bool(g_cfg.get("always_search"))
+    always_search_cfg = bool(g_cfg.get("always_search"))
     search_skip = set(g_cfg.get("search_skip_task_types") or ["chitchat"])
     max_claims = int(g_cfg.get("max_claims", 8))
     brave_usd = float(g_cfg.get("brave_usd_per_query", 0.0))
@@ -548,7 +549,8 @@ def build_grounded_graph(
         if not t or t == "chitchat" or t not in TASK_LABELS:
             return ""
         lang = lang_of(s.get("question", ""))
-        said = re.sub(r"\s*\n\s*", " / ", s.get("question", "").split("\n[Assistant asked]")[0]).strip()
+        said = media_display(s.get("question", "").split("\n[Assistant asked]")[0])   # 📎 names, not file text
+        said = re.sub(r"\s*\n\s*", " / ", said).strip()
         said = said if len(said) <= 60 else said[:59] + "…"
         return (f"我理解為：{task_label(t, lang)}—「{said}」" if lang == "zh"
                 else f"My understanding: {task_label(t, lang)} — \"{said}\"")
@@ -1133,6 +1135,8 @@ def build_grounded_graph(
         if private:
             return {"budget": budget, **base}
         kb_sure_hit = any(float(so.get("score") or 0) >= kb_sure for so in kb_sources.values())
+        # About an attached file: the file is the source; the planner decides whether the web is needed too.
+        always_search = always_search_cfg and not s.get("attachments")
         if always_search and (s.get("task_type") in search_skip or kb_sure_hit):
             return {"budget": budget, **base}
         kb_note = ("\nThe owner's own documents already returned: "
@@ -1165,7 +1169,8 @@ def build_grounded_graph(
             return {"budget": budget, **base}
         plan = parse_json(raw) or {}
         # The number/name heuristic overrides "no web" only when the owner's documents had nothing.
-        if not always_search and not plan.get("needs_web") and (kb_sources or not _FACT_HINT.search(s["question"])):
+        if not always_search and not plan.get("needs_web") and (kb_sources or s.get("attachments")
+                                                                 or not _FACT_HINT.search(s["question"])):
             return {"budget": budget, **base}
         entity = str(plan.get("entity") or "").strip() or None
         queries = [q for q in plan.get("queries") or [] if isinstance(q, dict) and str(q.get("query") or "").strip()]

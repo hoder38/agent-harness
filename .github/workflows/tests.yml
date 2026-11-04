@@ -23,3 +23,20 @@ jobs:
           cache-dependency-path: api/requirements*.txt
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pytest -q -p no:cacheprovider tests/
+
+  media-pytest:                    # phase 9 media-worker logic; no models (whisper/Docling/OCR) are loaded
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: media
+    env:
+      TZ: Asia/Taipei
+      POLICY_PATH: ../config/policy.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install arq redis "psycopg[binary]" httpx pyyaml pillow opencc-python-reimplemented pytest pytest-asyncio fakeredis
+      - run: python -m pytest -q -p no:cacheprovider tests/

@@ -8,9 +8,9 @@ from arq.jobs import Job as ArqJob
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .. import config, db, inbox, pipeline, state
+from .. import config, db, inbox, media, pipeline, state
 from ..channels import line
 from ..auth import require_owner
 from ..graphs.coding import build_coding_graph
@@ -45,15 +45,22 @@ def _public_tid(thread_id: str) -> str:
 def _thread_title(thread_id: str, first_text: str | None) -> str:
     if thread_id.startswith("line:"):
         return "LINE"
-    title = _OVERRIDE_PREFIX.sub("", (first_text or "").strip())
+    title = _OVERRIDE_PREFIX.sub("", media.display_text((first_text or "").strip()))
     return " ".join(title.split())[:30] or "(untitled)"
 
 
 class RunRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=100_000)
+    text: str = Field(default="", max_length=100_000)
     mode: Literal["interactive", "background"] = "interactive"
     override: Override | None = None
     client_msg_id: str | None = Field(default=None, max_length=128)  # idempotency key from the browser
+    attachments: list[str] = Field(default=[], max_length=10)          # ids from POST /uploads (phase 9)
+
+    @model_validator(mode="after")
+    def _not_empty(self):
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("text or attachments required")
+        return self
 
 
 def sse(event_id: str, type_: str, data: Any) -> str:
@@ -80,6 +87,21 @@ async def create_run(tid: str, body: RunRequest, request: Request, owner: str = 
     thread_id = _thread_id(tid)
     job = Job(channel="web", mode=body.mode, user_id=owner, thread_id=thread_id, text=body.text,
               override=body.override, dedupe_key=f"web:{body.client_msg_id or time.time_ns()}")
+    if body.attachments:
+        if await state.get_pending(state.get_redis(), thread_id):
+            raise HTTPException(409, "answer the open question first (attachments cannot be an answer)")
+        try:
+            job.attachments = await media.refs(body.attachments, thread_id)
+        except media.MediaError as e:
+            raise HTTPException(400, str(e))
+        await media.claim_for_thread(body.attachments, thread_id,
+                                     await state.is_thread_private(state.get_redis(), thread_id))
+        run_id = await media.start_run(job, request.app.state.arq)
+        if run_id is None:
+            raise HTTPException(409, "duplicate request")
+        if "text/event-stream" in request.headers.get("accept", ""):
+            return _stream_response(_event_stream(run_id))
+        return {"run_id": run_id, "thread_id": thread_id, "decision": None, "status": "processing"}
     res = await pipeline.submit(job, request.app.state.enqueue)
     if res.duplicate:
         raise HTTPException(409, "duplicate request")
@@ -110,6 +132,9 @@ async def cancel_run(run_id: str, request: Request, owner: str = Depends(require
         await state.clear_pending(r, meta["thread_id"])
         await state.clear_clarify_ctx(r, meta["thread_id"])
         await state.set_run_meta(r, run_id, status="cancelled")
+    if meta.get("status") == "processing":  # attachments still being extracted: the media-worker stops there
+        await state.set_run_meta(r, run_id, status="cancelled")
+        await state.emit(r, run_id, "cancelled", {"reason": "user (processing attachments)"})
     if meta.get("status") == "queued":  # not started yet: also drop it from the queue
         try:
             await ArqJob(run_id, request.app.state.arq, _queue_name=meta["queue"]).abort(timeout=0.5)
@@ -158,7 +183,8 @@ async def resume_run(run_id: str, body: ResumeRequest, request: Request, owner: 
 
 def _serialize(m: Any) -> dict[str, Any] | None:
     if isinstance(m, HumanMessage):
-        return {"id": m.id, "role": "user", "content": m.content}
+        return {"id": m.id, "role": "user",
+                "content": media.display_text(m.content) if isinstance(m.content, str) else m.content}
     if isinstance(m, AIMessage):
         return {"id": m.id, "role": "assistant", "content": m.content,
                 "tool_calls": [t["name"] for t in m.tool_calls] or None}

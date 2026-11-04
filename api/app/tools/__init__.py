@@ -92,3 +92,15 @@ def narrow_for_intent(tools: list, text: str) -> list:
     if _ADD_WORDS.search(text) and _SLOT.search(text):
         return [t for t in tools if t.name != "add_todo"]
     return tools
+
+
+WRITE_TOOLS = {"add_todo", "complete_todo", "add_event", "delete_event", "remember"}
+_REMEMBER = re.compile(r"記住|記下|remember", re.I)
+
+
+def for_attachments(tools: list, owner_text: str) -> list:
+    """§16: attached files are data. Write tools stay only when the owner's own words ask for such an action
+    ("把會議紀錄裡的待辦加進清單"), never because the file's text says so."""
+    if _TODO_WORDS.search(owner_text) or _ADD_WORDS.search(owner_text) or _REMEMBER.search(owner_text):
+        return tools
+    return [t for t in tools if t.name not in WRITE_TOOLS]

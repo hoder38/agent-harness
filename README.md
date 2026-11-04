@@ -48,8 +48,9 @@ curl -N -H "Authorization: Bearer $T" -H 'Accept: text/event-stream' -H 'Content
 - `GET /api/agent/threads/{tid}` returns the thread history and `pending` (the open clarifying question, if any).
 - `GET /api/agent/threads` lists your chats, newest first, built from the decision log. `line` is your LINE thread.
 - `DELETE /api/agent/threads/{tid}` hides a chat from the list until its next message. The history is kept.
+- `POST /api/agent/uploads?thread={tid}` (raw file body, `X-Filename: <url-encoded name>`) stores a file and starts extracting it; `GET /api/agent/uploads/{id}` shows its status and summary. Send the ids as `{"text": "...", "attachments": ["<id>"]}` to `/threads/{tid}/runs` (text may be empty). Images, voice, video, PDF/docx/xlsx/pptx/txt; 50 MB on the web, 100 MB on LINE. Runs start in `processing` (SSE `status` with `step`, then one `attachment` event per file). See ARCHITECTURE.md §5.
 
-SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `interrupt`, `done`, `error`, `cancelled`.
+SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `attachment`, `interrupt`, `done`, `error`, `cancelled`.
 - `interrupt` carries `{question, options, round, run_id}`; the run ends in `awaiting_input`.
 - `reset` means "discard the streamed text" (a compose retry starts over).
 - `done.grounding` = `{verdict, citations, unverified, budget}`.
@@ -151,7 +152,7 @@ Reminders: a todo with a due date gets a reminder 1 h before and 1 h after (Inbo
 - `src/back/controllers/agent-router.js`: `GET /api/agent-token` mints the HS256 JWT (perm=1 admins only;
   optional `AGENT_NODEREACT_USER` narrows it to one username). Needs `AGENT_JWT_SECRET` and `AGENT_OWNER_ID`
   in nodeReact `.env`, both matching this harness's `.env`.
-- `src/front/components/Agent.js` + `src/front/agent.js`: the `/Agent` chat page (threads, streaming, Stop, kill switch). For clarifying questions it shows the question with option buttons, Skip and Cancel, and a typed reply answers it via `/runs/{id}/resume`. It also handles `reset` and shows the source count.
+- `src/front/components/Agent.js` + `src/front/agent.js`: the `/Agent` chat page (threads, streaming, Stop, kill switch). For clarifying questions it shows the question with option buttons, Skip and Cancel, and a typed reply answers it via `/runs/{id}/resume`. It also handles `reset` and shows the source count. The 📎 button uploads files (chips show uploading/ready/error) and sends them with the message.
 - Deploy front-end changes:
   1. Build the bundle with `docker run --rm -v $PWD/src:/app/src -v $PWD/public:/app/public -w /app reactnode-server:v1.0 ./node_modules/.bin/webpack --config config/webpack.release.config.cjs`.
   2. Rebuild and restart nginx with `docker compose -f docker-compose.release.yml build nginx && docker compose -f docker-compose.release.yml up -d --no-deps nginx`.
@@ -165,6 +166,7 @@ docker compose --profile test build agent-test      # after requirements changes
 docker compose run --rm agent-test python -m pytest -q -p no:cacheprovider
 ```
 `agent-test` is the `test` stage of `api/Dockerfile`. It mounts `./api` and runs with no network.
+Media-worker tests: `docker compose --profile test build media-test && docker compose run --rm media-test`.
 
 ## Verified / notes
 

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
-from .. import config, db, inbox, state, verify
+from .. import config, db, inbox, media, state, verify
 from ..channels import line
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import SKIP, build_grounded_graph
@@ -20,7 +20,7 @@ from ..graphs.main import build_graph, system_prompt
 from ..llm.client import CloudBlocked, make_llm
 from ..models import LOCAL_MODELS, Decision, Job
 from ..telemetry import setup_tracing
-from ..tools import narrow_for_intent, required_tool, tools_for
+from ..tools import for_attachments, narrow_for_intent, required_tool, tools_for
 from ..tools.sandbox import SandboxClient, coding_config
 from . import memory_jobs
 from .alerts import check_budget, send_alert
@@ -163,7 +163,7 @@ async def _graph_input(graph, cfg: dict, payload: dict[str, Any], job: Job, deci
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": decision.route == "clarify",
             "no_clarify": False, "task_type": decision.task_type, "confirm_task": decision.confirm_task,
-            "correction": payload.get("correction")}
+            "correction": payload.get("correction"), "attachments": bool(job.attachments)}
 
 
 async def _turn_start(graph, cfg: dict, inp: Any) -> dict[str, Any]:
@@ -192,7 +192,8 @@ async def _escalation_input(graph, cfg: dict, start: dict[str, Any], payload: di
         return {"messages": [msg]}, run_cfg
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": False, "no_clarify": True,
-            "task_type": decision.task_type, "confirm_task": None, "correction": payload.get("correction")}, run_cfg
+            "task_type": decision.task_type, "confirm_task": None, "correction": payload.get("correction"),
+            "attachments": bool(job.attachments)}, run_cfg
 
 
 def _strip_echo(final: str, vals: dict[str, Any]) -> str:
@@ -279,8 +280,11 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             answer_nodes = {"compose"}
         else:
             tools = tools_for(route, private=decision.private, local=model in LOCAL_MODELS)
-            tools = narrow_for_intent(tools, payload["text"])
-            need = required_tool(tools, payload["text"])
+            owner_text = media.strip_blocks(payload["text"])   # = the text unless files are attached
+            if owner_text != payload["text"].strip():
+                tools = for_attachments(tools, owner_text)
+            tools = narrow_for_intent(tools, owner_text)
+            need = required_tool(tools, owner_text)
             required = need
             graph = build_graph(
                 llm, tools,
@@ -468,7 +472,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     if not coding and ctx.get("redis") is not None:
         try:
             await memory_jobs.after_turn(ctx["redis"], run_id=run_id, thread_id=job.thread_id,
-                                         user_text=payload.get("text") or "", answer=answer,
+                                         user_text=media.strip_blocks(payload.get("text") or ""), answer=answer,
                                          private=decision.private, channel=job.channel)
         except Exception:
             log.exception("memory after_turn failed")

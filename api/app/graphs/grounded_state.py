@@ -84,6 +84,7 @@ class GroundedState(MessagesState, total=False):
     model: str
     force_clarify: bool
     no_clarify: bool                    # verify escalation (§12): re-answer without asking the owner again
+    attachments: bool                   # the turn carries extracted file content (§5): search only if needed
     task_type: str | None               # router's (or the owner's confirmed) jev_router.TASK_TYPES key
     confirm_task: list[str]             # ask the owner to pick between these task types first
     answer_task_type: str | None        # router's reading of a free-text answer to that question

@@ -19,3 +19,4 @@ arize-phoenix-otel>=0.6
 openinference-instrumentation-langchain>=0.1
 nvidia-ml-py>=12
 mcp>=1.9,<2
+filetype>=1.2

@@ -52,8 +52,8 @@ Modalities: **text, voice, image, video, documents**.
 | Reranker | bge-reranker-v2-m3, local |
 | Keyword search | `pg_trgm` (or ParadeDB `pg_search` for BM25 + CJK) |
 | Doc parsing | Docling |
-| ASR | faster-whisper large-v3-turbo or SenseVoice; OpenCC → Traditional Chinese |
-| OCR | PaddleOCR (or Docling OCR) |
+| ASR | faster-whisper large-v3-turbo (chosen, phase 9); OpenCC → Traditional Chinese |
+| OCR | RapidOCR (PaddleOCR models on onnxruntime, phase 9) |
 | Video | ffmpeg (audio extract + scene keyframes) |
 | File storage | Plain volume `/srv/agent/files/<sha256[:2]>/<sha256>` + Postgres `attachments` metadata (S3 later only if needed) |
 | LLM gateway | **LiteLLM proxy** — single endpoint for Ollama / OpenAI / Anthropic (keys, budgets, retries, fallback, cost log) |
@@ -164,13 +164,57 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
 | Modality | GPU FREE | GPU BUSY/GAMING | Cloud (non-private only) |
 |---|---|---|---|
 | voice | faster-whisper/SenseVoice on GPU | same on CPU int8 | OpenAI transcription |
-| image | OCR + local VLM caption (**VERIFY** Qwen3.5 9B vision support with `ollama show`; else separate VL model loaded on demand) | OCR on CPU; vision → cloud or defer | GPT/Claude vision |
+| image | OCR + local VLM caption (Qwen3.5 9B vision via Ollama, `think:false` — resolved 2026-11-04) | OCR on CPU; vision → cloud or defer | GPT/Claude vision |
 | video | ffmpeg → audio→ASR; scene keyframes (max 16–32) → VLM; build timeline text | CPU, background only | frames + transcript to GPT/Claude |
 | doc | Docling → markdown; >~20 pages → chunk + index into RAG | Docling on CPU | Claude/GPT for hard layouts |
 
 4. Strip EXIF/GPS before any cloud upload.
 5. Output: `{text, attachments[], modality, privacy_tag, summary}`.
 6. Video and large docs are always `mode=background`; the user gets an immediate "processing" reply.
+
+### Implemented 2026-11-04 (phase 9)
+
+- **Flow.** Web: `POST /api/agent/uploads` (raw body, `X-Filename`, `?thread=`) stores the file, inserts the
+  `attachments` row and starts extraction at once (`extract_attachment`, job `extract:{id}`, queue `arq:media`); the
+  run then sends `attachments: [ids]` (text may be empty). LINE: image/audio/video/file messages are downloaded from
+  the content API (dedupe first, so redelivery never re-downloads). Both call `media.start_run`: run meta
+  `processing`, job `media:{run_id}` on the media-worker, which extracts every file (sha256 cache: a done,
+  non-degraded row with the same hash is reused; a Redis lock stops two workers doing the same file) and enqueues
+  `submit_media_run` (`msub:{run_id}`, interactive or background queue) on the agent worker. That composes the run
+  text and calls `pipeline.submit(run_id=…, router_text=…)`, so one run_id spans upload → answer. SSE adds
+  `status {processing, step}` and `attachment {id, kind, status, summary}`; cancel works while processing.
+- **Run text.** The owner's words (or `media.default_prompts[kind]` when empty) followed by one
+  `<untrusted source="attachment" kind=… name=…>` block per file (`</untrusted` inside the text is escaped), capped by
+  `media.max_chars`. A short voice note (≤ `voice_as_message_s`, or any LINE voice) with no typed text *is* the
+  request. Thread history shows `📎 name` instead of the blocks (`media.display_text`).
+- **Routing.** The router, decision log and thread context see only the instruction plus `📎 kind: name`
+  (`media.router_view`), never file content: a long video timeline drowned the instruction (intent 0.31 → clarify,
+  risky 0.65) and file text must not steer routing. Gate 0 still runs on the full text, so PRIVATE content in a file
+  locks the run local. Decision rule 3 never clarifies a run with attachments (the file is the subject). Rule 9 sends
+  video and `large_doc` to the background queue.
+- **Injection guard (§16).** File text never triggers actions. Live, "summarise this docx" created a todo from the
+  meeting minutes; now `tools.for_attachments` drops write tools unless the owner's own words ask for that action,
+  `narrow_for_intent`/`required_tool` look only at the owner's words, the pipeline shortcuts (`/commands`, `記住`,
+  the LINE write refusal) use `media.strip_blocks(text)`, and memory extraction gets the stripped text.
+- **media-worker** (`media/`, own image ~7.8 GB: torch CPU, ctranslate2 4.8 + nvidia cuBLAS/cuDNN pip libs, ffmpeg,
+  Docling, RapidOCR, OpenCC; models in volume `media-models`; files mounted read-only):
+
+  | Modality | GPU FREE | BUSY / GAMING | Notes |
+  |---|---|---|---|
+  | voice | faster-whisper large-v3-turbo CUDA fp16 under the GPU semaphore (7.6 s clip in ~1 s) | CPU int8 (4.2 s) | ffmpeg → 16 kHz WAV → numpy (this PyAV build rejects faster-whisper's `metadata_errors`); s2twp; GPU model unloaded after `asr.keep_alive_s` or when the GPU leaves FREE |
+  | image | RapidOCR + Qwen caption | OCR only, `degraded: true` (re-extracted next time) | EXIF-transposed, re-encoded without EXIF before any model; `image.when_gpu_busy: ocr_only` default; `cloud` = NORMAL files only, cost recorded from LiteLLM |
+  | doc | pdfium text; < 30 chars/page → render + OCR (scans); Docling for docx/xlsx/pptx and PDFs ≤ 50 pages | same (CPU) | > 20 pages or > 40 000 chars → `large_doc`: indexed into the KB (`upload/…md`) so answers cite it via RAG |
+  | video | ffmpeg audio → ASR; scene cuts on a 320-px proxy, up to `video.max_frames` (16) → caption + OCR; timeline `[mm:ss] 🗣 …` / `🖼 …` | CPU, background | audio-only containers become `voice` |
+
+  `killswitch=all` makes heavy extraction retry later; `media.max_jobs` (2) bounds concurrency.
+- **Verified live 2026-11-04:** receipt image (GPU caption + OCR, NT$245 answered); voice → todo request (GPU 6.3 s
+  incl. load; CPU int8 4.2 s while GAMING); docx summary with no todo created; scanned PDF (OCR path); 25-page text
+  PDF → `large_doc`, indexed, "parking cap" answered from page 17 with a KB citation; 14 s video → background queue,
+  5 frames + transcript, correct summary; GAMING: image OCR-only in 0.4 s, routed `cloud_fast` by rule 5. LINE:
+  content API reachable through squid (real 404 for a bad id; download errors now reply "無法下載…"); a full LINE
+  media round trip is covered by tests only.
+- **Not done:** cloud transcription / cloud vision fallbacks for voice and video (local CPU is always available);
+  HEIC is decoded but not tested live; PDFs > 50 pages skip Docling (plain per-page text).
 
 ## 6. L3–L5 Gates
 
@@ -993,9 +1037,9 @@ services:
     command: arq worker.CronSettings
     networks: [agent]
   media-worker:
-    build: ./media                       # ffmpeg, faster-whisper, Docling, PaddleOCR, opencc
-    command: arq media.Settings
-    volumes: [hf-cache:/root/.cache/huggingface]
+    build: ./media                       # ffmpeg, faster-whisper (ctranslate2), Docling, RapidOCR, opencc
+    command: arq media.worker.Settings   # queue arq:media
+    volumes: [media-models:/models, /srv/agent/files:/files:ro]
     deploy:
       resources:
         limits: { cpus: "8", memory: 12g }
@@ -1070,7 +1114,7 @@ services:
   #   HTTPS_PROXY=http://egress-proxy:4750  NO_PROXY=litellm,ollama,agent-postgres,agent-redis,phoenix
   #   OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006
   # => remove `egress` from every service except egress-proxy and syncthing.
-volumes: { ollama: {}, pg: {}, redis: {}, hf-cache: {}, syncthing: {}, phoenix: {} }
+volumes: { ollama: {}, pg: {}, redis: {}, hf-cache: {}, media-models: {}, syncthing: {}, phoenix: {} }
 networks:
   agent:  { internal: true }
   egress: {}                              # outbound internet; only egress-proxy + syncthing attach
@@ -1120,7 +1164,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 8b-read | Browser rendering fallback (§12b stage 1) — **implemented 2026-10-28** | JS-only page returns text via `browser`; private/loopback/metadata URLs blocked by squid; normal pages not rendered |
 | 8b-login | Interactive browsing + owner login (§12b stage 2) — planned | §12b stage 2 acceptance list |
 | 8c | Shopping: clarify item/budget, recommend real store listings (§12c) — **implemented 2026-10-28** (web only; LINE is chat-only, no shopping branch) | A missing budget is asked with option buttons; every pick is a real listing with code-rendered price/store/link; 「cheaper」 lowers the ceiling; unrelated listings are filtered |
-| 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
+| 9 | Media: voice, image, doc, then video — **implemented 2026-11-04**, live-verified (§5: image, voice, docx, scanned + 25-page PDF, video in background; GAMING → CPU int8 ASR and OCR-only images; nodeReact attach button) | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
@@ -1153,8 +1197,10 @@ re-prioritise remaining phases from real usage and the decision log.
 ## 17. Open items to VERIFY
 
 - `typesafe-sdk` async client and response field names; Jev data retention terms.
-- Qwen3.5 9B Ollama tag and whether it supports vision.
-- LINE reply-token expiry and content retention window.
+- Qwen3.5 9B Ollama tag and whether it supports vision (resolved 2026-11-04: `qwen3.5:9b` captions images via
+  `/api/chat` with `think:false`).
+- ctranslate2 CUDA on the RTX 5060 Ti (Blackwell) (resolved 2026-11-04: ctranslate2 4.8.5 float16 works; large-v3-turbo loads in ~1 s).
+- LINE reply-token expiry and content retention window (content API reachable through squid, 2026-11-04; retention still unverified, heavy media acks with the reply token at once).
 - Copilot CLI `--allow-tool` / `--deny-tool` pattern syntax (resolved 2026-10-28: `copilot help permissions` —
   `shell(cmd)`, `shell(git:*)` prefix form, `write(path?)`, `url(…)`; deny beats allow); ACP permission message format; terms for non-coding use.
 - LiteLLM, Phoenix, Smokescreen image tags and config keys.
