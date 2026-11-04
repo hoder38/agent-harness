@@ -49,6 +49,21 @@ def no_db(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def verify_scores(monkeypatch):
+    """L9 model checks never reach Jev/Ollama in tests: every answer scores 1.0 unless a test queues scores."""
+    from app import verify
+
+    scores: list[float] = []
+
+    async def score(request, answer, timeout_s):
+        return scores.pop(0) if scores else 1.0
+
+    monkeypatch.setattr(verify, "jev_score", score)
+    monkeypatch.setattr(verify, "qwen_score", score)
+    return scores
+
+
 @pytest.fixture
 def policy():
     """Real policy, with RAG/memory off so graph tests never reach Postgres/Ollama (tests inject kb/recall), and

@@ -83,6 +83,7 @@ class GroundedState(MessagesState, total=False):
     private: bool
     model: str
     force_clarify: bool
+    no_clarify: bool                    # verify escalation (§12): re-answer without asking the owner again
     task_type: str | None               # router's (or the owner's confirmed) jev_router.TASK_TYPES key
     confirm_task: list[str]             # ask the owner to pick between these task types first
     answer_task_type: str | None        # router's reading of a free-text answer to that question

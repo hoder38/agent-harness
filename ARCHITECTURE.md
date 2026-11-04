@@ -583,12 +583,20 @@ Container with NVML access (`capabilities: [utility]`) and read-only Docker even
 
 ## 12. L9 Verify layer & L10 Approval/Output
 
-> **Status:** only coding verify (phase 5) and grounded claim verification (phase 8a) are implemented. The general model check + tier escalation below is planned as phase 10b (§15); until then no run is escalated or sent to the Inbox for failing verification.
+> **Status:** implemented 2026-11-04 (phase 10b): `app/verify.py`, called by `jobs/worker.run_agent` before `done` for every grounded/ReAct answer (coding keeps its own test-based verify). Policy block `verify:`.
 
 Verify (skip for trivial chat):
 1. Deterministic: coding → harness-run tests/lint/build; assistant → schema valid, no tool errors, citations present when RAG used.
 2. Model check: Jev `Noul("The response fully and correctly answers the request")` for non-private; Qwen for private; deterministic-only when GAMING + private.
 3. Fail → escalate tier (local → cloud_fast → cloud_strong), max 2 escalations → Inbox item.
+
+Implementation notes (10b):
+- Skipped: coding, the ReAct `clarify` route, interrupted runs, and `chitchat` answers under 300 chars.
+- Deterministic (no model, checked first): empty answer (grounded: `answer_body`, without the 「我理解為」 line), ≥3 distinct Simplified-only characters (not for shopping lists: store titles), a tool error in this turn, the required write tool (`tools.required_tool`) not called. "Sources read but none cited" (`require_citations`) is off: live, all three tiers failed it on a correct answer because the search had found the wrong sources, and a bigger model reruns the same retrieval.
+- Model check: Jev Noul above on redacted request + answer (~200 ms); local Qwen JSON score when PRIVATE or the kill switch blocks cloud; none when that would need the GPU while GAMING. Fail below `min_score` 0.3 (calibrated on 77 real turns: every answer ≤0.3 was wrong, empty or off-topic). A checker error or timeout passes.
+- Escalation: the worker records where the turn started (`runmeta.verify_start`: pre-turn checkpoint, or the clarify interrupt for a resumed turn) and requeues the same run_id on the next tier, which forks the thread from that checkpoint (a resumed turn: `aupdate_state` + `Command(resume)` with the owner's answer). The failed answer drops out of the history; the re-run never asks a clarifying question again (`no_clarify`). Web gets `reset` + `status: requeued`. Never escalated: PRIVATE, kill switch cloud/all, a turn that called a write tool (todo/event/remember would run twice).
+- Final failure: the answer is delivered with a ⚠️ warning line (web and LINE) and an Inbox item `kind=verify` (request, answer, checks, models tried). `decisions.outcome.verify` records every tier's result; `cost_usd` is the total of all tiers.
+- Cost: cloud_fast averages $0.0013 per run, cloud_strong $0.034. At the calibrated ~25% failure rate that is ≈$0.0003 per turn for the first escalation, plus cloud_strong for the turns that fail again (the second step is ~25× the first; set `max_escalations: 1` to stop at cloud_fast).
 
 Approval:
 - `interrupt()` before: git push/PR merge, send mail/message to others, delete, calendar create/delete, any money action, network enablement in sandbox, any action flagged `risky`.
@@ -1115,7 +1123,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 9 | Media: voice, image, doc, then video | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
-| 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — planned. Today only coding verify (phase 5) and grounded claim verification (phase 8a) exist; the Inbox (phase 7) is ready to receive the failure items | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
+| 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
 | 11 | Cron/events, eval suite in CI, monthly restore test | Morning brief runs; eval regression check; restore test passes |
 
 ## 16. Security checklist
@@ -1230,7 +1238,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - **Inbox:** table `inbox` (`app/inbox.py`), kinds `approval|question|alert|memory`. REST `/api/agent/inbox` (list+counts, `/count`, `/{id}/read`, `/{id}/dismiss`, bulk `/dismiss` for alert|memory only, `/{id}/answer`).
 - **Approvals days later:** coding approvals and background questions create an item (LINE push unless it came from LINE; private threads get a generic text). The LangGraph checkpoint lives in Postgres; if the Redis pending marker expired, `answer` restores it and resumes. It refuses (409) if the thread has moved on. Dismissing an approval = reject (sandbox discarded).
 - Alerts and memory writes feed the Inbox; `inbox_cleanup_cron` (04:00) deletes old done/low items (`inbox:` in policy.yaml).
-- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Not done: verify-escalation → Inbox (needs the general L9 layer, phase 10b).
+- nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Failed verification after escalation → Inbox `verify` item (phase 10b).
 
 ### nodeReact tooling notes (found during phase 7)
 
@@ -1284,8 +1292,8 @@ regexes in `tools/__init__.py`; keep them conservative (queries such as "what to
 both tools available when the request is ambiguous.
 
 **Not done / limits:** the rules only cover clear phrasings; an ambiguous message ("新增 買牛奶") can still be filed in
-the wrong place. A general model-based verifier for tool use belongs to phase 10b (L9 verify layer), and must stay
-local for PRIVATE text. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
+the wrong place. The L9 verify layer (phase 10b) now catches a required write tool that was not called and
+tool errors, checking PRIVATE text with local Qwen only; it does not re-run turns that wrote data. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
 
 - **LINE is chat + notify only (2026-10-30):** `decision` rule 6 forces every LINE message to the `chat` route (no todo/calendar/coding tools; models stay local or cloud_fast). A clear add-todo/add-event phrasing on LINE is answered in code ("use the web") before any model runs (`pipeline._line_write_request`), so the model cannot claim it saved something. Todos, calendar and approvals are done on the web. `GET /threads` now returns `private`; the web chat list shows 🔒 and the header shows "Private · local only" for a locked thread (a new chat unlocks).
 - **LINE thread reset (2026-10-30):** the first LINE thread (`line:<uid>`) was locked PRIVATE with private history, so the owner asked for a clean start. `channels.line.thread_id()` now returns `line:<uid>:2`; the old thread is hidden and never sent anywhere. The web alias `line` maps to the new thread. (Superseded the same day: calendar keywords no longer lock a LINE thread, see below.)

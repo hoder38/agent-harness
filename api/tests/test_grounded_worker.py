@@ -247,3 +247,104 @@ async def test_task_type_question_then_answer_streams_the_understanding_line_fir
     echo = 'My understanding: Knowledge or advice — "gpt-9 plans"'
     assert "".join(d for t, d in evs if t == "token") == f"{echo}\n\nGPT-9 costs $20 per month [1]."
     assert evs[-1][1]["text"].startswith(f"{echo}\n\nGPT-9 costs $20 per month [1].\n\nSources:")
+
+
+# ---------------------------------------------------------------- L9 verify + escalation (§12, 10b)
+class FakeArq:
+    def __init__(self):
+        self.jobs = []
+
+    async def enqueue_job(self, fn, payload, **kw):
+        if fn == "run_agent":  # not the memory jobs
+            self.jobs.append(payload)
+
+    def __getattr__(self, name):  # memory jobs enqueue through other calls
+        async def noop(*a, **kw):
+            return None
+        return noop
+
+
+async def _messages(ctx):
+    snap = await worker.build_grounded_graph(None, policy={}, checkpointer=ctx["checkpointer"]).aget_state(
+        {"configurable": {"thread_id": "web:t"}})
+    return [m.content for m in snap.values["messages"]]
+
+
+async def test_failed_answer_is_rerun_on_cloud_from_the_turn_start(redis, enq, confs, llm, verify_scores):
+    box = llm({"draft": ["Hello!", "I'll look it up.", "Paris."], "extract_claims": {"claims": []}})
+    ctx = {**CTX(), "redis": FakeArq()}
+    await pipeline.submit(job("hi", "0"), enq)
+    await worker.run_agent(ctx, enq.calls[-1]["payload"])  # an earlier turn stays in the history
+    res = await pipeline.submit(job("capital of France?", "a"), enq)
+    verify_scores.extend([0.05, 0.9])
+    assert (await worker.run_agent(ctx, enq.calls[-1]["payload"]))["status"] == "requeued"
+    (payload,) = ctx["redis"].jobs
+    assert payload["model"] == "cloud_fast" and payload["escalate"]["history"][0]["model"] == "local"
+    assert (await worker.run_agent(ctx, payload))["status"] == "done"
+    assert box["models"][-2:] == ["local", "cloud_fast"]
+    evs = await events(redis, res.run_id)
+    assert ("status", "requeued") in [(t, d.get("status")) for t, d in evs if t == "status"]
+    done = evs[-1][1]
+    assert done["text"].startswith("Paris.") and done["verify"]["escalations"] == 1
+    assert await _messages(ctx) == ["hi", "Hello!", "capital of France?", "Paris."]  # failed answer dropped
+
+
+async def test_resumed_turn_is_rerun_with_the_owners_answer(redis, enq, confs, llm, verify_scores):
+    box = llm({"assess_ambiguity": [{"ambiguous": True, "question_to_user": "Which phone?"}, {"ambiguous": False}],
+         "draft": ["Dunno.", "The Pixel costs $499."], "extract_claims": {"claims": []}})
+    ctx = {**CTX(), "redis": FakeArq()}
+    await pipeline.submit(job("how much is that one", "a"), enq)
+    await worker.run_agent(ctx, enq.calls[-1]["payload"])
+    await pipeline.submit(job("Pixel", "b"), enq)
+    verify_scores.extend([0.1, 0.9])
+    assert (await worker.run_agent(ctx, enq.calls[-1]["payload"]))["status"] == "requeued"
+    assert (await worker.run_agent(ctx, ctx["redis"].jobs[-1]))["status"] == "done"
+    msgs = await _messages(ctx)
+    assert msgs[:3] == ["how much is that one", "Which phone?", "Pixel"] and len(msgs) == 4  # "Dunno." dropped
+    assert "The Pixel costs $499." in msgs[3]
+    assert box["llm"].calls.count("assess_ambiguity") == 2  # the re-run does not ask again
+
+
+async def test_after_max_escalations_the_answer_is_sent_with_a_warning_and_an_inbox_item(
+        redis, enq, confs, llm, verify_scores, monkeypatch):
+    added = []
+
+    async def add(kind, title, body="", **kw):
+        added.append((kind, title, kw))
+
+    monkeypatch.setattr(worker.inbox, "add", add)
+    box = llm({"draft": "Wrong.", "extract_claims": {"claims": []}})
+    ctx = {**CTX(), "redis": FakeArq()}
+    res = await pipeline.submit(job("capital of France?", "a"), enq)
+    verify_scores.extend([0.1, 0.1, 0.1])
+    payload = enq.calls[-1]["payload"]
+    while (await worker.run_agent(ctx, payload))["status"] == "requeued":
+        payload = ctx["redis"].jobs[-1]
+    assert box["models"] == ["local", "cloud_fast", "cloud_strong"]
+    done = (await events(redis, res.run_id))[-1][1]
+    assert done["text"].startswith("Wrong.") and "⚠️" in done["text"]
+    assert done["verify"]["stopped"] == "max escalations" and done["verify"]["escalations"] == 2
+    ((kind, _, kw),) = added
+    assert kind == "verify" and kw["run_id"] == res.run_id
+
+
+async def test_private_answer_is_checked_locally_and_never_escalated(redis, enq, confs, llm, verify_scores, monkeypatch):
+    called = []
+
+    async def jev(*a):
+        called.append("jev")
+        return 1.0
+
+    async def qwen(*a):
+        called.append("qwen")
+        return 0.1
+
+    monkeypatch.setattr(worker.verify, "jev_score", jev)
+    monkeypatch.setattr(worker.verify, "qwen_score", qwen)
+    box = llm({"draft": "Wrong.", "extract_claims": {"claims": []}})
+    ctx = {**CTX(), "redis": FakeArq()}
+    await pipeline.submit(job("my balance?", "a", source="finance"), enq)
+    payload = enq.calls[-1]["payload"]
+    assert payload["decision"]["private"]
+    assert (await worker.run_agent(ctx, payload))["status"] == "done"
+    assert called == ["qwen"] and not ctx["redis"].jobs and set(box["models"]) == {"local"}

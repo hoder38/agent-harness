@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-05.5
+version: 2026-11-05.6
 
 thresholds:
   clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -10,6 +10,23 @@ thresholds:
   task_confirm_below: 0.7 # top task_type probability < this ...
   task_margin: 0.3        # ... or top-2 gap < this -> ask the owner which kind of answer (clarify.confirm_task_types)
   correction: 0.6         # router `correction` above this -> re-route previous + current message as one request
+
+# L9 verify (§12, phase 10b): check each finished answer; a failed one is re-run local → cloud_fast → cloud_strong
+# (never for PRIVATE or under the cloud kill switch, never after a write tool ran), then reported in the Inbox.
+verify:
+  enabled: true
+  min_score: 0.3              # Jev/Qwen "fully and correctly answers"; calibrated on 77 real turns (bad ones ≤0.2)
+  max_escalations: 2
+  require_citations: false    # true: verdict "uncited" fails. Off: a bigger model reruns the same retrieval, so it
+                              # fails again (live: local → cloud_fast → cloud_strong all uncited, correct answer)
+  simplified_min_chars: 3     # distinct Simplified-only characters that fail a non-shopping answer
+  skip_task_types: [chitchat]
+  trivial_chars: 300          # ...when the answer is shorter than this
+  jev_timeout_s: 5
+  qwen_timeout_s: 30
+  inbox: true
+  warning_zh: "⚠️ 這個回答沒有通過自動檢查,可能不完整或不正確,請自行確認。"
+  warning_en: "⚠️ This answer failed the automatic check and may be incomplete or wrong; please double-check."
 
 clarify:
   max_rounds: 10          # after this many clarify turns in a row, answer with stated assumptions

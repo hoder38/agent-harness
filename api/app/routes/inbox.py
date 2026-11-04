@@ -56,7 +56,7 @@ async def dismiss_item(item_id: int, request: Request, owner: str = Depends(requ
 
 
 class DismissBulk(BaseModel):
-    kind: Literal["alert", "memory"]
+    kind: Literal["alert", "memory", "verify"]
 
 
 @router.post("/inbox/dismiss")

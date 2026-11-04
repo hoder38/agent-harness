@@ -378,7 +378,7 @@ def build_grounded_graph(
         return {
             **corr, "turn_id": s.get("run_id") or (human.id if human else ""),
             "question": s.get("correction") or (_text(human.content) if human else ""),
-            "clarifications": [], "assumptions": [], "pending_ask": None, "skip_clarify": False, "draft": "",
+            "clarifications": [], "assumptions": [], "pending_ask": None, "skip_clarify": bool(s.get("no_clarify")), "draft": "",
             "claims": [], "candidates": [], "judged": {}, "sources": {}, "queries": [], "searched": [], "loops": 0, "conflicts": [],
             "budget": new_budget(), "turn_started_ms": t, "clock_ms": t, "answer": None, "answer_body": "",
             "compose_round": 0, "check_failures": [], "shopping": False, "intent_answered": False,

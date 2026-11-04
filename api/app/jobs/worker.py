@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
-from .. import config, db, inbox, state
+from .. import config, db, inbox, state, verify
 from ..channels import line
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import SKIP, build_grounded_graph
@@ -162,8 +162,42 @@ async def _graph_input(graph, cfg: dict, payload: dict[str, Any], job: Job, deci
         return {"messages": [msg]}
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": decision.route == "clarify",
-            "task_type": decision.task_type, "confirm_task": decision.confirm_task,
+            "no_clarify": False, "task_type": decision.task_type, "confirm_task": decision.confirm_task,
             "correction": payload.get("correction")}
+
+
+async def _turn_start(graph, cfg: dict, inp: Any) -> dict[str, Any]:
+    """Where this turn started, so a verify escalation can re-run it from there (§12 L9)."""
+    snap = await graph.aget_state(cfg)
+    return {"ckpt": (snap.config or {}).get("configurable", {}).get("checkpoint_id"),
+            "kind": "resume" if isinstance(inp, Command) else "input"}
+
+
+async def _escalation_input(graph, cfg: dict, start: dict[str, Any], payload: dict[str, Any], job: Job,
+                            decision: Decision, model: str, grounded: bool) -> tuple[Any, dict]:
+    """Fork the thread at the turn's start: the failed answer drops out of the history (§12 L9)."""
+    ckpt = start.get("ckpt")
+    if ckpt is None:  # the turn started a new thread: fork from its first checkpoint
+        async for snap in graph.aget_state_history(cfg):
+            ckpt = snap.config["configurable"].get("checkpoint_id")
+    run_cfg = ({**cfg, "configurable": {**cfg["configurable"], "checkpoint_ns": "", "checkpoint_id": ckpt}}
+               if ckpt else cfg)
+    run_id = payload["run_id"]
+    if start.get("kind") == "resume":
+        run_cfg = await graph.aupdate_state(run_cfg, {"run_id": run_id, "model": model, "no_clarify": True,
+                                                     "skip_clarify": True})
+        return Command(resume=(payload.get("resume") or {}).get("value") or SKIP), run_cfg
+    msg = HumanMessage(payload["text"], id=run_id)
+    if not grounded:
+        return {"messages": [msg]}, run_cfg
+    return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
+            "private": decision.private, "model": model, "force_clarify": False, "no_clarify": True,
+            "task_type": decision.task_type, "confirm_task": None, "correction": payload.get("correction")}, run_cfg
+
+
+def _strip_echo(final: str, vals: dict[str, Any]) -> str:
+    line = ((vals.get("answer") or {}).get("understood") or "")
+    return final[len(line):].strip() if line and final.startswith(line) else final
 
 
 def _line_question(q: dict[str, Any], zh: bool) -> str:
@@ -225,6 +259,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     gaming_stop = False
     asked: dict[str, Any] | None = None
     started = time.monotonic()
+    required: str | None = None
+    escalate: dict[str, Any] = payload.get("escalate") or {}
     try:
         llm = make_llm(model, ks)
         max_turns = int(ex.get("max_history_turns", 20))
@@ -245,6 +281,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             tools = tools_for(route, private=decision.private, local=model in LOCAL_MODELS)
             tools = narrow_for_intent(tools, payload["text"])
             need = required_tool(tools, payload["text"])
+            required = need
             graph = build_graph(
                 llm, tools,
                 system=system_prompt(route, job.channel, model, web=any(t.name == "fetch_page" for t in tools)),
@@ -262,7 +299,15 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             "metadata": {"run_id": run_id, "route": route, "model": model, "channel": job.channel},
             "tags": [route, model, job.channel],
         }
-        inp = await _graph_input(graph, cfg, payload, job, decision, model, grounded or coding)
+        run_cfg = cfg
+        if escalate and meta.get("verify_start"):
+            inp, run_cfg = await _escalation_input(graph, cfg, meta["verify_start"], payload, job, decision, model,
+                                                   grounded)
+        else:
+            inp = await _graph_input(graph, cfg, payload, job, decision, model, grounded or coding)
+            if inp is not None and not coding and "verify_start" not in meta:
+                await state.set_run_meta(r, run_id, verify_start=await _turn_start(graph, cfg, inp))
+                meta["verify_start"] = True
         if coding and isinstance(inp, dict):
             inp["killswitch"] = ks
         sem = (state.GpuSemaphore(r, int(pol.get("gpu_concurrency", 2)))
@@ -272,7 +317,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         stream_id = None
         echo = ""  # "我理解為：…" line from the grounded compose node, sent before each (re)written answer
         async with sem:
-            async for mode, data in graph.astream(inp, cfg, stream_mode=["messages", "updates", "custom"]):
+            async for mode, data in graph.astream(inp, run_cfg, stream_mode=["messages", "updates", "custom"]):
                 now = time.monotonic()
                 if now - last_check > CANCEL_POLL_S:
                     last_check = now
@@ -325,6 +370,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         return await _fail(r, run_id, job, decision, delivery, pol, e)
 
     cost = await _account(r, run_id, model, usage, pol)
+    cost += float(escalate.get("cost") or 0)  # earlier tiers of a verify escalation: the run's total
     if cancelled:
         await state.emit(r, run_id, "cancelled", {"reason": "user"})
         await state.set_run_meta(r, run_id, status="cancelled")
@@ -385,6 +431,25 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                    "unverified": len(ans.get("unverified") or []), "budget": b}
         done["grounding"] = summary
         outcome["grounding"] = summary
+    checked = await _verify(r, run_id, payload, job, decision, route, model, ks, gpu, grounded, coding, required,
+                            vals, final, escalate, meta)
+    if checked.get("requeue"):
+        if streamed:
+            await state.emit(r, run_id, "reset", {"reason": f"verify failed: re-answering on {checked['requeue']}"})
+        await state.emit(r, run_id, "status", {"status": "requeued", "reason": "verify failed",
+                                               "model": checked["requeue"], "fails": checked["verify"]["fails"]})
+        await state.emit(r, run_id, "decision", {**decision.model_dump(), "model": checked["requeue"]})
+        await state.set_run_meta(r, run_id, status="queued")
+        await db.update_outcome(run_id, {"status": "escalated", "usage": usage, "ms": elapsed, "model": model,
+                                         "verify": checked["verify"]}, cost)
+        await _requeue(ctx, {**payload, "model": checked["requeue"], "decision": decision.model_dump(),
+                             "escalate": {**checked["escalate"], "cost": cost}}, queue, 0)
+        return {"status": "requeued"}
+    if checked.get("verify"):
+        outcome["verify"] = done["verify"] = checked["verify"]
+    answer = final  # what memory sees: without the verify warning
+    if checked.get("warning"):
+        final = done["text"] = f"{final}\n\n{checked['warning']}"
     if coding and vals.get("coding"):
         c = vals["coding"]
         summary = {k: c.get(k) for k in ("repo", "task_id", "status", "branch", "usage", "attempt", "revisions")}
@@ -403,11 +468,54 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     if not coding and ctx.get("redis") is not None:
         try:
             await memory_jobs.after_turn(ctx["redis"], run_id=run_id, thread_id=job.thread_id,
-                                         user_text=payload.get("text") or "", answer=final,
+                                         user_text=payload.get("text") or "", answer=answer,
                                          private=decision.private, channel=job.channel)
         except Exception:
             log.exception("memory after_turn failed")
     return {"status": "done"}
+
+
+async def _verify(r, run_id: str, payload: dict[str, Any], job: Job, decision: Decision, route: str, model: str,
+                  ks: str, gpu: str, grounded: bool, coding: bool, required: str | None, vals: dict[str, Any],
+                  final: str, escalate: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """L9 (§12): check the answer; re-run a failed one on the next tier, or deliver it with a warning + Inbox item."""
+    if coding:
+        return {}
+    c = verify.cfg()
+    messages = vals.get("messages", [])
+    body = (vals.get("answer_body") or _strip_echo(final, vals)) if grounded else final
+    if not verify.should_check(route=route, task_type=decision.task_type, body=body, c=c):
+        return {}
+    request = (vals.get("question") if grounded else None) or payload.get("text") or ""
+    t0 = time.monotonic()
+    res = await verify.check(request=request, answer=body, body=body, messages=messages, private=decision.private,
+                             gpu=gpu, killswitch=ks, grounding=vals.get("answer") if grounded else None,
+                             required_tool=required)
+    history = list(escalate.get("history") or []) + [
+        {"model": model, "passed": res.passed, "fails": res.fails, "score": res.score, "checker": res.checker}]
+    out = {**res.dump(), "ms": int((time.monotonic() - t0) * 1000), "escalations": len(history) - 1,
+           "history": history}
+    if res.passed:
+        return {"verify": out}
+    nxt = verify.next_model(model, private=decision.private, killswitch=ks)
+    blocked = ("max escalations" if len(history) - 1 >= int(c.get("max_escalations", 2)) else
+               "no higher tier" if nxt is None else
+               "turn wrote data" if verify.wrote_something(messages) else
+               "no start checkpoint" if not meta.get("verify_start") else None)
+    if blocked is None:
+        decision.reasons.append(f"verify: {'; '.join(res.fails)} → re-answer on {nxt}")
+        return {"verify": out, "requeue": nxt, "escalate": {"history": history}}
+    out["stopped"] = blocked
+    log.info("run %s failed verify (%s), not escalated: %s", run_id, res.fails, blocked)
+    if c.get("inbox", True):
+        tried = " → ".join(h["model"] for h in history)
+        await inbox.add("verify", f"Answer failed verification: {request[:60]}",
+                        f"Checks: {'; '.join(res.fails)}\nModels: {tried}\nNot re-run: {blocked}\n\n"
+                        f"Request:\n{request[:1000]}\n\nAnswer:\n{body[:2000]}",
+                        priority="normal", private=decision.private, run_id=run_id, thread_id=job.thread_id,
+                        detail={"verify": out})
+    zh = bool(_CJK.search(request))
+    return {"verify": out, "warning": c.get("warning_zh" if zh else "warning_en")}
 
 
 async def _fail(r, run_id, job, decision, delivery, pol, e: Exception) -> dict[str, Any]:
