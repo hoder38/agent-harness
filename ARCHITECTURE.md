@@ -569,7 +569,7 @@ knowledge. `PostgresStore` remains the agent's own memory; RAG indexes the vault
 - Vault: `/home/hoder/vault` (host directory, git-tracked).
 - Machine is headless → edit from other devices via **Syncthing** (container) to Obsidian
   desktop/mobile, and optionally a browser-accessible Obsidian container
-  (`lscr.io/linuxserver/obsidian`, **VERIFY** image), bound to LAN/VPN only.
+  (`lscr.io/linuxserver/obsidian`, not verified — not built, see Implemented below), bound to LAN/VPN only.
 - Alternative sync: Obsidian Sync (paid) or Self-hosted LiveSync (CouchDB).
 
 **Folder convention**
@@ -601,7 +601,7 @@ vault/
 
 **Notion migration (one-off job)**
 1. Notion → Settings → Export all workspace content → **HTML**, include subpages and files (split by teamspace if large).
-2. Obsidian **Importer** plugin (official) → Notion → import zip into `vault/Notion/` (**VERIFY** whether current Importer also supports Notion API import and how databases map to Obsidian Bases).
+2. Obsidian **Importer** plugin (official) → Notion → import zip into `vault/Notion/` (resolved 2026-11-04: it also imports via the Notion API; databases → folder + `.base`, primary view only — see Implemented below).
 3. Post-process script: add frontmatter `source: notion`, `notion_id`, `privacy`; fix remaining links; convert database CSVs to notes or Bases; move files into `Attachments/`.
 4. Validate: page count vs Notion, broken-link report, spot-check databases and embeds.
 5. Index into RAG; keep Notion read-only for ~1 month, then archive.
@@ -1212,14 +1212,14 @@ re-prioritise remaining phases from real usage and the decision log.
 
 | # | Phase | Done when |
 |---|---|---|
-| 1 | Compose skeleton: postgres, redis, ollama, **litellm**, **phoenix**, **egress-proxy**, agent-api; one ReAct chat graph; SSE; minimal React chat page in nodeReact | Chat streams tokens; thread survives agent-api restart; trace visible in Phoenix; non-allowlisted domain blocked |
-| 2 | Gate 0 + Jev router + decision layer (+ Qwen fallback router; Gate 1 stub only); `decisions` logging + replay tool | Unit tests for `decide()` cover every rule; Jev outage → fallback works |
-| 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
+| 1 | Compose skeleton: postgres, redis, ollama, **litellm**, **phoenix**, **egress-proxy**, agent-api; one ReAct chat graph; SSE; minimal React chat page in nodeReact — **implemented 2026-10-21** (MVP) | Chat streams tokens; thread survives agent-api restart; trace visible in Phoenix; non-allowlisted domain blocked |
+| 2 | Gate 0 + Jev router + decision layer (+ Qwen fallback router; Gate 1 stub only); `decisions` logging + replay tool — **implemented 2026-10-21** (MVP) | Unit tests for `decide()` cover every rule; Jev outage → fallback works |
+| 3 | Job layer (arq queues, cancel, dedupe) — chat already goes through it; **kill switch**; **ZFS backups** — **implemented 2026-10-21** (MVP) | Cancel button stops a run within one step; duplicate webhook ignored; `/stop cloud` blocks cloud calls; nightly backup + snapshot created |
 | 4 | gpu-governor + Ollama unload — **implemented 2026-10-28, live-verified 2026-11-03** (§11: real Moonlight sessions entered GAMING via NVENC on 11-02; forced GAMING unloaded Qwen + embeddings 8.4 → 0.4 GB in ~1 s and a web turn routed to `cloud_fast` by rule 5, embeddings on CPU) | Starting `steam-headless` + streaming frees Qwen VRAM within 10 s; jobs route to cloud |
 | 5 | Coding route: sandbox-manager + Copilot (headless, not ACP) + verify + approval — **implemented 2026-10-28** (§9a; verified end-to-end, squid gate passed) | Task produces diff, harness-run tests pass, push blocked until approved (nothing is ever pushed; approval creates a local branch) |
 | 6 | Copilot ingest hooks + harness-memory MCP — **implemented 2026-10-30** (§9b; verified live 2026-11-04: hooks → ingest → `copilot:<id>` episode; `recall`/`get_thread_summary` from a Copilot CLI session) | SSH session appears as `copilot:<id>` thread; recall works from SSH Copilot |
-| 7 | Todos + Inbox + background approvals ✅ | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
-| 8 | LINE channel + **health alerts** | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
+| 7 | Todos + Inbox + background approvals — **implemented 2026-10-30** (+ 7b Google Calendar, Inbox-approved writes) | Todo CRUD from web, agent, Copilot; paused job resumes after approval days later |
+| 8 | LINE channel + **health alerts** — **implemented 2026-10-21** (MVP; LINE is chat + notify only since 2026-10-30) | Owner-only; quick reply + push for long jobs; no PRIVATE content sent; stopping a container triggers one LINE alert |
 | 8a | Grounded answering (§12a): clarify interrupt/resume (web + LINE), claim extraction, authority tiers, per-turn caps — **implemented 2026-10-28** (web verified live; LINE resume verified live 2026-10-28/10-30/11-03) | §12a test table passes; ambiguous question asks before answering; every factual claim has one T1 citation or an "Unverified" label; caps never exceeded |
 | 8b-read | Browser rendering fallback (§12b stage 1) — **implemented 2026-10-28** | JS-only page returns text via `browser`; private/loopback/metadata URLs blocked by squid; normal pages not rendered |
 | 8b-login | Interactive browsing + owner login (§12b stage 2) — planned | §12b stage 2 acceptance list |
@@ -1229,6 +1229,14 @@ re-prioritise remaining phases from real usage and the decision log.
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import — **implemented 2026-11-04**, live-verified (§10a: edit → indexed in 0.3 s; writes only via `/vault-rw/Inbox|AI`, other edits by Inbox approval; Notion import tooling ready, import itself pending) | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
 | 11 | Cron/events, eval suite in CI, monthly restore test — **implemented 2026-11-04**, live-verified (brief → web thread + Inbox + LINE notice; restore test OK in 4 s) | Morning brief runs; eval regression check; restore test passes |
+
+**Remaining (2026-11-04):**
+- **8b-login** — interactive browsing + owner login (§12b stage 2): not built.
+- **PRIVATE verify mode** — back `kb_search`/`kb_read` (§12) with `store.search(private=True)`; until then verify-mode claims on PRIVATE threads are labelled unverified (`cite_only`, the default, already cites the docs folder and vault).
+- **Gate 1** (§6) — deferred by design; build only if the decision log shows Gate 0 missing private data.
+- **Media gaps** (§5) — no cloud ASR/vision fallback; HEIC untested live; PDFs > 50 pages skip Docling.
+- **Vault** (§10a) — Notion import (owner step); optional browser Obsidian container; Inbox triage / weekly vault health report / unindexed staging folder discussed and postponed.
+- **§17 VERIFY items** still open: `typesafe-sdk` fields + Jev retention, LINE content retention, LiteLLM/Phoenix/Smokescreen tags, least-privilege Copilot token, nodeReact nginx network name.
 
 ## 16. Security checklist
 
@@ -1267,8 +1275,8 @@ re-prioritise remaining phases from real usage and the decision log.
 - Copilot CLI: honours `HTTPS_PROXY` (resolved 2026-10-28: all Copilot traffic seen in the squid log);
   least-privilege token type; usage/credit field names (resolved: `session.usage_checkpoint`).
 - Name of the nodeReact nginx Docker network.
-- Obsidian Importer: Notion API support and database → Bases mapping; linuxserver/obsidian image.
-- §12a: Brave `freshness` parameter and per-query price; whether the LINE reply token outlives a clarify round (else use push); local KB (§10a) timeline for PRIVATE verification.
+- Obsidian Importer: Notion API support and database → Bases mapping (resolved 2026-11-04, §10a); linuxserver/obsidian image (open; optional, not built).
+- §12a: Brave `freshness` parameter and per-query price; whether the LINE reply token outlives a clarify round (else use push); local KB for PRIVATE verification (§10a shipped 2026-11-04; wiring `kb_search`/`kb_read` is still open).
   - Resolved 2026-10-28 (langgraph 1.2.16):
     - interrupts arrive as `updates` `{"__interrupt__": (Interrupt(...),)}`;
     - `Command(resume=None)` re-raises the interrupt, so the sentinel `"/skip"` is used;
