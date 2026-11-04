@@ -140,8 +140,8 @@ class Job(BaseModel):
 |---|---|---|---|
 | nodeReact | `POST /api/agent/threads/{id}/runs` (SSE stream), `GET /api/agent/threads/{id}`, `POST /api/agent/runs/{id}/resume`, `POST /api/agent/runs/{id}/cancel`, `/api/agent/todos` CRUD, `/api/agent/inbox`, `POST /api/agent/uploads` | Short-lived JWT issued by nodeReact (see §4a) | Complex chat, todos, approvals, uploads |
 | LINE | `POST /line/webhook` | Verify `X-Line-Signature`; allowlist owner LINE userId | Reply quickly with reply token; long jobs reply later via push API. Never send PRIVATE content to LINE. **VERIFY** current reply-token expiry and content-download retention. |
-| Cron | arq cron reads `schedules` table | internal | e.g. morning brief, stock check |
-| Events | `POST /events/{source}` | per-source secret / HMAC | GitHub webhook, mail poll, price alerts |
+| Cron | arq cron `schedules_cron` reads the `schedules` table every minute (Asia/Taipei) | internal | morning brief, nightly eval, owner prompts (§19) |
+| Events | `POST /events/{source}` | per-source HMAC (`X-Hub-Signature-256`) | GitHub webhook etc. → Inbox item only, never an agent run (§19) |
 | Copilot ingest | `POST /ingest/copilot` on `127.0.0.1:8100` | Bearer token from `~/.config/harness/token` | Bypasses router (§9) |
 
 ### 4a. nodeReact → agent-api authentication
@@ -1124,7 +1124,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
-| 11 | Cron/events, eval suite in CI, monthly restore test | Morning brief runs; eval regression check; restore test passes |
+| 11 | Cron/events, eval suite in CI, monthly restore test — **implemented 2026-11-04**, live-verified (brief → web thread + Inbox + LINE notice; restore test OK in 4 s) | Morning brief runs; eval regression check; restore test passes |
 
 ## 16. Security checklist
 
@@ -1202,7 +1202,14 @@ re-prioritise remaining phases from real usage and the decision log.
   3. `zfs snapshot tank/agent-backup@YYYYMMDD`
   4. Retention: 14 daily, 8 weekly, 6 monthly snapshots (sanoid or simple script).
 - Never back up `.env` in plain text; store it encrypted (e.g. `age`) if included.
-- Monthly restore test: restore latest dump into a throwaway `pgvector/pgvector:pg17` container and run a smoke query; result → LINE alert.
+- Monthly restore test (`host/restore-test.sh`, timer `agent-restore-test.timer`, 1st of the month 05:00): restores `pg/agent.dump` into a throwaway `pgvector/pgvector:pg17` container (`--network none`), counts decisions/todos/chunks, alerts to LINE on pass or fail, removes the container.
+
+### Schedules, morning brief, events, eval (phase 11, 2026-11-04)
+- **Schedules** (`app/schedules.py`, table `schedules`): 5-field cron in Asia/Taipei; `schedules_cron` (agent-scheduler, second 5) claims each due row once per minute. Builtins come from policy `schedules.builtin` (inserted when missing; editable/disable-able, not deletable). Owner schedules are kind `prompt` and run their text as a background cron job in `web:sched-<name>`. REST: `GET/POST /api/agent/schedules`, `PATCH/DELETE /schedules/{id}`, `POST /schedules/{id}/run`.
+- **Morning brief** (`app/brief.py`, 07:00, no model call): weather (Open-Meteo, places in policy `brief.weather`), today's calendar, overdue/due todos, Inbox counts, yesterday's spend. The full text goes to the private web thread `web:brief` (one message per day; follow-ups stay local) and an Inbox item `brief` (the previous one is dismissed). LINE gets only weather, counts and spend — never calendar or todo titles.
+- **Events** (`app/events.py`): `POST /events/{source}` needs a source in policy `events.sources` and a secret in `EVENT_SECRETS` (JSON); else 404. Bad HMAC → 401; body ≤256 KB JSON; deduped on `X-Event-Id` / `X-GitHub-Delivery` / body hash. Result: an Inbox item `event` (private unless the source says otherwise) and an optional LINE line. Events never start an agent run (untrusted text).
+- **Nightly eval** (`app/tools/answer_eval.py`, 02:30, background queue): `config/answer_eval.yaml` questions run through the real pipeline in throwaway `eval:*` threads (no memory written, not listed); pass = finished without a question and contains an expected string. Plus `rag_eval` recall@5/MRR. Stored in `eval_runs`; a drop vs. the previous run beyond policy `eval` thresholds → LINE alert `eval:regression`. Manual: `docker compose exec agent-worker-bg python -m app.tools.answer_eval -v`.
+- **CI**: `.github/workflows/tests.yml` runs the unit tests (no services) on every push.
 
 ### Kill switch
 - Redis key `killswitch` ∈ {off, cloud, all}. `cloud` = block every non-local model call (LiteLLM pre-call hook + decision layer) and Copilot sandboxes; `all` = also pause every background queue.

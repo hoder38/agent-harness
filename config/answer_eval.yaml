@@ -1,0 +1,30 @@
+# End-to-end answer eval (phase 11): python -m app.tools.answer_eval [-v] [--no-rag]; nightly via the `nightly_eval`
+# schedule. Each question runs through the real pipeline (router → graph → L9 verify) in a throwaway thread
+# `eval:<date>-<n>` (not listed on the web, no memory written). A case passes when the run finishes without asking
+# a question and the answer contains any `expect` string (case-insensitive). Keep answers stable over time: no prices,
+# weather or "latest" facts.
+cases:
+  - q: 台灣最高的山是哪一座?
+    expect: [玉山]
+  - q: 太陽系最大的行星是哪一顆?
+    expect: [木星, Jupiter]
+  - q: 台北101大樓有多高?
+    expect: ["508"]
+  - q: 台積電的創辦人是誰?
+    expect: [張忠謀]
+  - q: 一公斤大約等於幾磅?
+    expect: ["2.2"]
+  - q: 在一大氣壓下水的沸點是攝氏幾度?
+    expect: ["100"]
+  - q: Python 程式語言是誰創造的?
+    expect: [Guido, 范羅蘇姆]
+  - q: 中華民國的國慶日是幾月幾日?
+    expect: [10月10日, 十月十日, 雙十]
+  - q: 日月潭位於台灣哪個縣?
+    expect: [南投]
+  - q: What is the chemical symbol for gold?
+    expect: [Au]
+  - q: 光在真空中的速度大約是每秒多少公里?
+    expect: ["30萬", "300,000", "299,792", "299792", "300000", "三十萬"]
+  - q: 台灣高鐵最南端的車站是哪一站?
+    expect: [左營]

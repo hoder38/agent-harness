@@ -29,6 +29,7 @@ agent-scheduler: cron alert watcher (containers, queue age, budget) → LINE pus
    sudo zfs create tank/agent-backup && sudo chown hoder:hoder /tank/agent-backup
    sudo zfs allow -u $USER snapshot,create,mount,destroy tank/agent-backup
    sudo cp host/systemd/agent-backup.* /etc/systemd/system/ && sudo systemctl enable --now agent-backup.timer
+   sudo cp host/systemd/agent-restore-test.* /etc/systemd/system/ && sudo systemctl enable --now agent-restore-test.timer
    ```
 
 ## Usage

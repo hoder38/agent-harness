@@ -6,6 +6,7 @@
 - `alert`: health alerts (also pushed to LINE by `alerts.send_alert`).
 - `memory`: every automatic or agent-made memory write, low priority.
 - `verify`: an answer that failed the L9 verify checks and could not be re-run on a higher tier (§12).
+- `brief`: the morning brief (only the latest stays open); `event`: an inbound `/events/{source}` event (phase 11).
 Everything here is best effort: a failure to write an inbox row never fails the run that caused it.
 """
 import json
@@ -19,7 +20,7 @@ from .settings import get_settings
 
 log = logging.getLogger(__name__)
 
-Kind = Literal["approval", "question", "alert", "memory", "verify"]
+Kind = Literal["approval", "question", "alert", "memory", "verify", "brief", "event"]
 ACTIONABLE = ("approval", "question")
 _COLS = "id, created_at, updated_at, kind, priority, title, body, status, read, private, run_id, thread_id, detail"
 

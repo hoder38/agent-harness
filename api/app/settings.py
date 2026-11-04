@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     agent_jwt_secret: str = "change-me"
     jwt_issuer: str = "nodereact"
     jwt_audience: str = "agent-harness"
+    event_secrets: dict[str, str] = {}   # phase 11: EVENT_SECRETS='{"source": "hmac secret"}'
     harness_token: str = ""          # host-only internal endpoints (backup alerts, ingest)
 
     line_channel_secret: str = ""

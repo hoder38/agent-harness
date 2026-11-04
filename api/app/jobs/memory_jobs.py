@@ -27,7 +27,7 @@ async def after_turn(redis, *, run_id: str, thread_id: str, user_text: str, answ
     """Called by run_agent after a finished turn: queue fact extraction and mark the thread for an episode."""
     pol = config.policy()
     mc = pol.get("memory") or {}
-    if not mc.get("enabled"):
+    if not mc.get("enabled") or thread_id.startswith("eval:"):
         return
     await redis.zadd(ACTIVE, {thread_id: time.time()})
     if mc.get("auto_extract", True) and memory.worth_extracting(user_text):

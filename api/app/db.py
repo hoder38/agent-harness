@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS inbox (
     id              BIGSERIAL PRIMARY KEY,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    kind            TEXT NOT NULL,                       -- approval | question | alert | memory
+    kind            TEXT NOT NULL,                       -- approval | question | alert | memory | verify | brief | event
     priority        TEXT NOT NULL DEFAULT 'normal',      -- high | normal | low
     title           TEXT NOT NULL,
     body            TEXT NOT NULL DEFAULT '',
@@ -99,6 +99,39 @@ CREATE TABLE IF NOT EXISTS inbox (
 CREATE INDEX IF NOT EXISTS inbox_status_created ON inbox (status, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS inbox_open_run ON inbox (run_id)
     WHERE status = 'open' AND kind IN ('approval', 'question');
+
+-- phase 11 (§4 Cron/Events, §19): app/schedules.py, app/events.py, app/tools/answer_eval.py
+CREATE TABLE IF NOT EXISTS schedules (
+    id              BIGSERIAL PRIMARY KEY,
+    name            TEXT NOT NULL UNIQUE,
+    kind            TEXT NOT NULL,                       -- brief | eval | prompt
+    cron            TEXT NOT NULL,                       -- "m h dom mon dow", Asia/Taipei
+    text            TEXT NOT NULL DEFAULT '',            -- prompt for kind=prompt
+    enabled         BOOLEAN NOT NULL DEFAULT true,
+    builtin         BOOLEAN NOT NULL DEFAULT false,
+    last_run_at     TIMESTAMPTZ,
+    last_status     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id              BIGSERIAL PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    source          TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    payload         JSONB NOT NULL DEFAULT '{}',
+    run_id          TEXT,
+    UNIQUE (source, event_id)
+);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id              BIGSERIAL PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    n               INT NOT NULL,
+    passed          INT NOT NULL,
+    metrics         JSONB NOT NULL DEFAULT '{}',
+    detail          JSONB NOT NULL DEFAULT '[]'
+);
 """
 
 

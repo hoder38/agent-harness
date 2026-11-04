@@ -1,9 +1,11 @@
 """arq entrypoints:  arq worker.Settings | worker.BackgroundSettings | worker.CronSettings"""
-from arq import cron
+from arq import cron, func
 from arq.connections import RedisSettings
 
 from app.config import load_yaml
+from app import schedules
 from app.jobs import alerts, copilot_jobs, memory_jobs, todo_jobs
+from app.tools.answer_eval import answer_eval_job
 from app.jobs.worker import run_agent, shutdown, startup
 from app.settings import get_settings
 
@@ -42,7 +44,7 @@ class BackgroundSettings:
     """Background / coding / media queue. (arq ignores inherited attributes, so list them all.)"""
     redis_settings = _redis
     functions = [run_agent, memory_jobs.extract_memory, memory_jobs.summarize_episode, memory_jobs.index_docs_job,
-                 copilot_jobs.ingest_copilot]
+                 copilot_jobs.ingest_copilot, func(answer_eval_job, timeout=3600, max_tries=1)]
     on_startup = startup
     on_shutdown = shutdown
     max_tries = 3
@@ -68,6 +70,7 @@ class CronSettings:
         cron(memory_jobs.inbox_cleanup_cron, hour={4}, minute={0}, second={0}, unique=True, timeout=60),
         cron(todo_jobs.todo_reminders_cron, second={15}, unique=True, timeout=30),
         cron(memory_jobs.sweep_memory_ttl, minute={7}, second={0}, unique=True, timeout=300),
+        cron(schedules.schedules_cron, second={5}, unique=True, timeout=55),
     ]
     on_startup = _cron_startup
     on_shutdown = _cron_shutdown

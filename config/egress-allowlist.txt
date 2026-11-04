@@ -9,6 +9,8 @@ api.anthropic.com
 # Google Calendar (phase 7b)
 www.googleapis.com
 oauth2.googleapis.com
+# Weather for the morning brief (phase 11, no key)
+api.open-meteo.com
 # LINE
 api.line.me
 api-data.line.me

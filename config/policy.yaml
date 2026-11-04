@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-05.6
+version: 2026-11-05.7
 
 thresholds:
   clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -10,6 +10,35 @@ thresholds:
   task_confirm_below: 0.7 # top task_type probability < this ...
   task_margin: 0.3        # ... or top-2 gap < this -> ask the owner which kind of answer (clarify.confirm_task_types)
   correction: 0.6         # router `correction` above this -> re-route previous + current message as one request
+
+# Phase 11: morning brief (app/brief.py). Built in code, no model call. The full brief (calendar, due todos, weather,
+# Inbox counts, spend) goes to the private web thread `web:brief` + an Inbox item; LINE only gets weather and counts.
+brief:
+  line: true
+  spend: true
+  sections: [calendar]
+  weather:   # Open-Meteo (no key)
+    - {name: 新北市中和區, lat: 24.999, lon: 121.499}
+    - {name: 台北市中正區, lat: 25.032, lon: 121.519}
+
+# Phase 11 schedules (app/schedules.py, Asia/Taipei cron). Builtins are inserted once; edit/disable them via
+# /api/agent/schedules. Owner-made schedules (kind `prompt`) run their text as a cron job in `web:sched-<name>`.
+schedules:
+  builtin:
+    morning_brief: {kind: brief, cron: "0 7 * * *"}
+    nightly_eval: {kind: eval, cron: "30 2 * * *"}
+
+# Phase 11 events: POST /events/<source> with `X-Hub-Signature-256: sha256=<hmac>` (secret in EVENT_SECRETS JSON).
+# An event only becomes an Inbox item (+ optional LINE line); it never starts an agent run.
+events:
+  sources: {}
+  #  github: {title_field: repository.full_name, private: false, line: true, priority: normal}
+
+# Nightly eval (app/tools/answer_eval.py): LINE alert when results drop vs. the previous run.
+eval:
+  max_answer_drop: 2      # answer passes down by this many or more
+  max_recall_drop: 0.05   # KB recall@5 down by more than this
+  case_timeout_s: 240
 
 # L9 verify (§12, phase 10b): check each finished answer; a failed one is re-run local → cloud_fast → cloud_strong
 # (never for PRIVATE or under the cloud kill switch, never after a write tool ran), then reported in the Inbox.

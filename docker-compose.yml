@@ -28,6 +28,7 @@ x-app-env: &app-env
   LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET:-}
   LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
   LINE_OWNER_USER_ID: ${LINE_OWNER_USER_ID:-}
+  EVENT_SECRETS: ${EVENT_SECRETS:-{}}               # phase 11: JSON {"source": "hmac secret"}
   DOCKER_HOST: http://socket-proxy-ro:2375
   POLICY_PATH: /config/policy.yaml
   PRIVACY_RULES_PATH: /config/privacy_rules.yaml
