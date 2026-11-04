@@ -163,7 +163,8 @@ async def _graph_input(graph, cfg: dict, payload: dict[str, Any], job: Job, deci
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": decision.route == "clarify",
             "no_clarify": False, "task_type": decision.task_type, "confirm_task": decision.confirm_task,
-            "correction": payload.get("correction"), "attachments": bool(job.attachments)}
+            "correction": payload.get("correction"), "attachments": bool(job.attachments),
+            "images": [a.id for a in job.attachments if a.kind == "image"]}
 
 
 async def _turn_start(graph, cfg: dict, inp: Any) -> dict[str, Any]:
@@ -193,7 +194,8 @@ async def _escalation_input(graph, cfg: dict, start: dict[str, Any], payload: di
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": False, "no_clarify": True,
             "task_type": decision.task_type, "confirm_task": None, "correction": payload.get("correction"),
-            "attachments": bool(job.attachments)}, run_cfg
+            "attachments": bool(job.attachments),
+            "images": [a.id for a in job.attachments if a.kind == "image"]}, run_cfg
 
 
 def _strip_echo(final: str, vals: dict[str, Any]) -> str:

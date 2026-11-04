@@ -4,6 +4,7 @@ Extraction itself runs in the media-worker (`media/`, queue `arq:media`). A run 
 api → media-worker `media_run` (extract) → agent worker `submit_media_run` (compose + pipeline.submit), all under
 one run_id, so the browser follows a single SSE stream.
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -153,6 +154,45 @@ async def get(ids: list[str]) -> list[dict[str, Any]]:
         cur = await conn.execute("SELECT * FROM attachments WHERE id = ANY(%s)", (ids,))
         rows = {r["id"]: r for r in await cur.fetchall()}
     return [rows[i] for i in ids if i in rows]
+
+
+def _jpeg_uri(path: Path, max_side: int) -> str:
+    import base64
+    import io
+
+    from PIL import Image, ImageOps
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:  # pragma: no cover
+        pass
+    with Image.open(path) as im:
+        img = ImageOps.exif_transpose(im).convert("RGB")
+    img.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=88)    # re-encoded: EXIF/GPS never leaves the box (§5)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+async def image_parts(ids: list[str]) -> list[dict[str, Any]]:
+    """The pictures themselves for a cloud model (media.image.send_to_cloud): NORMAL image attachments only,
+    downscaled and re-encoded at call time, so no base64 lands in the checkpoints."""
+    icfg = cfg().get("image") or {}
+    if not ids or not icfg.get("send_to_cloud"):
+        return []
+    side = int(icfg.get("cloud_max_side", 2048))
+    parts = []
+    for a in (await get(ids))[: int(icfg.get("max_images", 4))]:
+        p = file_path(a["sha256"])
+        if a.get("kind") != "image" or a.get("private") or not p.exists():
+            continue
+        try:
+            uri = await asyncio.to_thread(_jpeg_uri, p, side)
+        except Exception as e:
+            log.warning("image %s not sent to the model: %s", a["id"], e)
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": uri}})
+    return parts
 
 
 def is_heavy(kind: str) -> bool:

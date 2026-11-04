@@ -5,7 +5,7 @@ import pytest
 
 os.environ.setdefault("POLICY_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "config", "policy.yaml"))
 
-from media import asr, common, extract, video, worker  # noqa: E402
+from media import asr, common, extract, image, video, worker  # noqa: E402
 
 
 @pytest.fixture
@@ -122,3 +122,13 @@ def test_line_file_without_text_waits_for_the_question():
     assert worker._line_text_wait({"channel": "line", "text": "這是什麼"}, {"reply_ts": now}, ["image"]) is None
     assert worker._line_text_wait({"channel": "line", "text": ""}, {"reply_ts": now}, ["voice"]) is None
     assert worker._line_text_wait({"channel": "web", "text": ""}, {"reply_ts": now}, ["image"]) is None
+
+
+def test_shelf_prices_pair_with_the_nearest_sized_product():
+    def b(x, y, w=300, h=40):
+        return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+    items = [(b(0, 0), "秋元水產-薄削柴魚片25G"), (b(60, 50, 120, 60), "IZO"),
+             (b(1000, 0), "日本丸友-德用柴魚片45G"), (b(1100, 50, 80, 60), "98"),
+             (b(0, 500), "25g"), (b(2000, 900, 80, 40), "350")]
+    assert image.price_pairs(items) == ["秋元水產-薄削柴魚片25G — 120(辨識為「IZO」)",
+                                        "日本丸友-德用柴魚片45G — 98"]

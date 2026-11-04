@@ -3,6 +3,7 @@ cloud model while it is busy, never for PRIVATE files) (§5)."""
 import asyncio
 import base64
 import io
+import math
 import re
 import logging
 import threading
@@ -25,7 +26,7 @@ _ocr = None
 _ocr_lock = threading.Lock()
 
 CAPTION_PROMPT = ("請用繁體中文描述這張圖片:主要內容、人物或物件、場景,以及圖中重要的文字或數字。"
-                  "只描述看得到的東西,不要猜測。")
+                  "只描述看得到的東西,不要猜測;圖中沒寫出的貨幣、單位或品牌不要自行補上。")
 FRAME_PROMPT = "用一句繁體中文描述這個影片畫面(看得到的內容與文字)。"
 
 
@@ -48,7 +49,7 @@ def jpeg_b64(img: Image.Image, max_side: int) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _ocr_sync(img: Image.Image) -> str:
+def _ocr_boxes(img: Image.Image) -> list:
     global _ocr
     import numpy as np
 
@@ -57,12 +58,13 @@ def _ocr_sync(img: Image.Image) -> str:
             from rapidocr_onnxruntime import RapidOCR
             _ocr = RapidOCR()
         res, _ = _ocr(np.array(img)[:, :, ::-1])   # BGR like OpenCV
-    if not res:
-        return ""
-    lines: list[list[tuple[float, str]]] = []      # group boxes into rows by their vertical centre
-    for box, text, score in sorted(res, key=lambda x: (x[0][0][1] + x[0][2][1]) / 2):
-        if float(score) < 0.5 or not text.strip():
-            continue
+    return [(box, text.strip() if KANA_RE.search(text) else common.to_trad(text.strip(), "s2tw"))
+            for box, text, score in res or [] if float(score) >= 0.5 and text.strip()]
+
+
+def _rows(items: list) -> str:
+    lines: list[list[tuple[float, str, float]]] = []      # group boxes into rows by their vertical centre
+    for box, text in sorted(items, key=lambda x: (x[0][0][1] + x[0][2][1]) / 2):
         y = (box[0][1] + box[2][1]) / 2
         h = abs(box[2][1] - box[0][1]) or 1
         if lines and abs(lines[-1][0][0] - y) < h * 0.5:
@@ -70,6 +72,55 @@ def _ocr_sync(img: Image.Image) -> str:
         else:
             lines.append([(y, text, box[0][0])])
     return "\n".join(" ".join(t for _, t, _ in sorted(row, key=lambda x: x[2])) for row in lines)
+
+
+PRICE_RE = re.compile(r"^(?:NT\$|\$|＄)?\s*(\d{1,3}(?:,\d{3})+|\d{2,5})\s*(?:元|円)?$")
+KANA_RE = re.compile(r"[\u3040-\u30ff]")   # Japanese: leave its kanji alone
+LOOKALIKE = str.maketrans("IlZzOoSB|", "112200581")   # price-tag fonts: IZO = 120, Z88 = 288
+LOOKALIKE_RE = re.compile(r"^[\dIlZzOoSB|]{3,5}$")
+SIZE_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:g|G|kg|KG|克|公克|ml|mL|ML|l|L|入|包|片|枚)")
+
+
+def _rect(box: list) -> tuple[float, float, float, float]:
+    xs, ys = [p[0] for p in box], [p[1] for p in box]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def price_pairs(items: list) -> list[str]:
+    """Shelf labels: pair each product line that states a size (25G, 500ml…) with the nearest bare price box,
+    one-to-one by the gap between the boxes, so prices stop floating free of their products in the flat rows."""
+    names, prices = [], []
+    for box, text in items:
+        r = _rect(box)
+        if (m := PRICE_RE.match(text)) and not SIZE_RE.search(text):
+            prices.append((r, m.group(1)))
+        elif LOOKALIKE_RE.match(text) and re.search(r"[\dZ]", text):
+            prices.append((r, f"{text.translate(LOOKALIKE)}(辨識為「{text}」)"))
+        elif SIZE_RE.search(text) and len(re.sub(r"[\d\W_]", "", text)) >= 3:
+            names.append((r, text))
+    cands = []
+    for i, (nr, _) in enumerate(names):
+        h = nr[3] - nr[1] or 1
+        for j, (pr, _) in enumerate(prices):
+            gap = math.hypot(max(nr[0] - pr[2], pr[0] - nr[2], 0), max(nr[1] - pr[3], pr[1] - nr[3], 0))
+            if gap <= h * 6:
+                cands.append((gap, i, j))
+    used_n, used_p, out = set(), set(), {}
+    for _, i, j in sorted(cands):
+        if i not in used_n and j not in used_p:
+            used_n.add(i)
+            used_p.add(j)
+            out[i] = prices[j][1]
+    return [f"{names[i][1]} — {out[i]}" for i in sorted(out, key=lambda i: (names[i][0][1], names[i][0][0]))]
+
+
+def _ocr_sync(img: Image.Image) -> str:
+    return _rows(_ocr_boxes(img))
+
+
+def _ocr_layout(img: Image.Image) -> tuple[str, list[str]]:
+    items = _ocr_boxes(img)
+    return _rows(items), price_pairs(items)
 
 
 async def ocr(img: Image.Image) -> str:
@@ -133,18 +184,20 @@ async def extract(att: dict[str, Any]) -> dict[str, Any]:
     src = str(common.file_path(att["sha256"]))
     img = await asyncio.to_thread(load, src)
     path = await describe_path(bool(att.get("private")))
-    text_task = asyncio.create_task(ocr(img))
+    text_task = asyncio.create_task(asyncio.to_thread(_ocr_layout, img))
     caption, err = "", None
     try:
         caption = await describe(img, path)
     except Exception as e:
         log.warning("image description failed (%s): %s", path, e)
         err, path = str(e)[:200], "cpu"
-    found = await text_task
+    found, pairs = await text_task
     parts = []
     if caption:
         parts.append(f"【圖片描述】\n{caption}")
     parts.append(f"【圖中文字】\n{found}" if found else "【圖中文字】(無)")
+    if pairs:
+        parts.append("【標價配對】(依位置推測,商品 — 標價)\n" + "\n".join(pairs))
     if path == "cpu":
         parts.append("(GPU 忙碌中,只做了文字辨識,沒有圖片描述。)" if not err else "(圖片描述失敗,只有文字辨識。)")
     meta = {"path": path, "degraded": path == "cpu", "width": img.width, "height": img.height}

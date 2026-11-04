@@ -189,3 +189,7 @@ def test_task_type_not_confirmed_when_private_resuming_or_coding(policy):
     assert d(policy, g=g0(private=True), r=r).confirm_task == []
     assert decide(job(), g0(), r, "FREE", NO_BUDGET, policy, resuming=True).confirm_task == []
     assert d(policy, r=r.model_copy(update={"intent": "coding"})).confirm_task == []
+    pic = job(attachments=[AttachmentRef(id="a", kind="image")])
+    out = d(policy, j=pic, r=rr(task_type="shopping", task_probs={"shopping": 0.42, "factual": 0.41}))
+    assert out.confirm_task == [] and out.task_type == "factual"
+    assert "3b: not asked (attachments) → factual" in out.reasons

@@ -188,6 +188,9 @@ media:
     max_side: 1280                    # downscale before the vision model (EXIF always stripped)
     when_gpu_busy: ocr_only           # ocr_only | cloud (NORMAL files only, kill switch off, budget left)
     cloud_model: cloud_fast
+    send_to_cloud: true               # cloud answer tiers also see the turn's photos (NORMAL only, EXIF stripped)
+    cloud_max_side: 2048
+    max_images: 4
   video:
     max_frames: 16
     scene: 0.3                        # ffmpeg scene-change threshold for keyframes

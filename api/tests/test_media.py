@@ -343,3 +343,31 @@ async def test_shortcuts_ignore_attachment_text(redis, no_db):
             attachments=[AttachmentRef(id="a1", kind="doc", mime="text/plain")])
     res = await pipeline.submit(j, enq)
     assert res.command_reply is None and calls and calls[0]["text"] == text
+
+
+async def test_photos_for_cloud_models_skip_private_and_strip_exif(files, monkeypatch):
+    import base64
+    import io
+
+    from PIL import Image
+
+    def save(sha, size):
+        p = media.file_path(sha)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        exif = Image.Exif()
+        exif[0x010F] = "PhoneMaker"
+        Image.new("RGB", size, "red").save(p, "JPEG", exif=exif)
+
+    save("aa11", (3000, 1000))
+    save("bb22", (100, 100))
+    rows = [{"id": "n", "kind": "image", "sha256": "aa11", "private": False},
+            {"id": "p", "kind": "image", "sha256": "bb22", "private": True},
+            {"id": "d", "kind": "doc", "sha256": "bb22", "private": False}]
+
+    async def get(ids):
+        return rows
+
+    monkeypatch.setattr(media, "get", get)
+    (part,) = await media.image_parts(["n", "p", "d"])
+    img = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"].split(",", 1)[1])))
+    assert img.size == (2048, 683) and not img.getexif()

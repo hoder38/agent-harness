@@ -220,6 +220,21 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
   pending question) is offered to that run (`media:text:{run_id}`, SET NX); `submit_media_run` closes the slot and
   uses it as the instruction with the text's fresh reply token. If the run was already submitted, the text starts a
   new run with the same file attached (extraction cached). Only one text per file; multi-photo albums are separate runs.
+- **Shelf photo, "which is cheapest per gram" (2026-11-04, found live):** the answer model only had flat OCR rows, so
+  prices floated free of products; it was asked "factual or shopping?", escalated to `cloud_strong` (verify 0.11) and
+  hedged at $0.037. Fixed:
+  - *Pictures to cloud tiers.* The worker puts the turn's image ids in grounded state (`images`). For `cloud_*`
+    models on NORMAL runs, `draft` and `compose` attach them (`media.image_parts`: NORMAL images only,
+    re-encoded at `image.cloud_max_side` 2048 px without EXIF, at most `image.max_images`, built at call time so
+    no base64 reaches checkpoints). Local tiers and PRIVATE runs get text only; `image.send_to_cloud: false` turns it off.
+  - *Price pairing.* OCR keeps the boxes. Each line stating a size (25G, 500ml…) is paired one-to-one with the
+    nearest bare price box. Look-alike digits on price-tag fonts are mapped and flagged ("IZO" → 120). The pairs
+    go in a 【標價配對】 section, so local-only runs can read them too.
+  - OCR text goes through OpenCC s2tw, except lines with kana. The caption prompt says not to add currency, units
+    or brands that aren't visible (it had written 日元).
+  - Rule 3b: with attachments, a near-tie between task types is not asked. The type that answers from the
+    files wins over a web pipeline (shopping 0.46 vs factual 0.35 → factual).
+  - Re-run: correct (45 g / 98 → about 2.18 per gram), `cloud_fast`, verify 0.77, $0.0008, 14 s, no question asked.
 - **Not done:** cloud transcription / cloud vision fallbacks for voice and video (local CPU is always available);
   HEIC is decoded but not tested live; PDFs > 50 pages skip Docling (plain per-page text).
 

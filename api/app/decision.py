@@ -90,7 +90,14 @@ def decide(
             reasons.append(f"3: {' & '.join(why)} → clarify on {model}")
 
     # 3b. unsure what kind of answer is wanted → the graph asks the owner to pick (options from task labels)
+    task_type = router.task_type
     confirm_task = _confirm_task(router, th, policy, reasons)
+    if confirm_task and job.attachments and not (resuming or private) and route in ("chat", "clarify"):
+        # the files are the subject: a near-tie goes to the reading that answers from them, not a web pipeline
+        types = set((policy.get("clarify") or {}).get("confirm_task_types", ["shopping"]))
+        task_type = next((t for t in confirm_task if t not in types), task_type)
+        reasons.append(f"3b: not asked (attachments) → {task_type}")
+        confirm_task = []
     if confirm_task and (route not in ("chat", "clarify") or private or resuming or clarify_rounds >= max_rounds):
         reasons.append("3b: not asked (" + ("resuming" if resuming else "private" if private
                        else "clarify cap" if clarify_rounds >= max_rounds else f"route={route}") + ")")
@@ -162,7 +169,7 @@ def decide(
         queue = "background"
 
     return Decision(route=route, model=model, queue=queue, risky=risky, private=private,
-                    task_type=router.task_type, confirm_task=confirm_task, reasons=reasons)
+                    task_type=task_type, confirm_task=confirm_task, reasons=reasons)
 
 
 def _confirm_task(router: RouterResult, th: dict[str, Any], policy: dict[str, Any], reasons: list[str]) -> list[str]:

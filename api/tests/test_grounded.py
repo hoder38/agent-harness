@@ -533,3 +533,24 @@ async def test_cite_only_renumbers_cited_sources_in_order_of_use(cite):
     out, _ = await run(g, inp("OpenAI pricing?"))
     assert out["answer"]["text"].startswith("B says so [1]. Also [1].\n\nSources:\n[1] Title https://openai.com/b")
     assert out["answer"]["citations"] == [{"n": 1, "source_id": "s2", "url": "https://openai.com/b"}]
+
+
+# ---------------------------------------------------------------- media (§5)
+@pytest.mark.parametrize("model,private,sees", [("cloud_fast", False, True), ("local", False, False),
+                                                ("cloud_fast", True, False)])
+async def test_cloud_tiers_see_the_turns_photos(redis, policy, model, private, sees):
+    asked = []
+
+    async def pictures(ids):
+        asked.append(ids)
+        return [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}}]
+
+    llm = TaskLLM(script={"draft": "Draft."}, calls=[], seen=[])
+    g = build_grounded_graph(llm, policy=policy, checkpointer=InMemorySaver(), search=Web().search,
+                             fetch=Web().fetch, pictures=pictures, clock=Clock())
+    await run(g, inp("which is cheapest per gram", model=model, private=private, images=["a1"]))
+    draft = next(m for t, m in llm.seen if t == "draft")[-1]
+    assert isinstance(draft.content, list) is sees and asked == ([["a1"]] if sees else [])
+    if sees:
+        assert draft.content[0] == {"type": "text", "text": "which is cheapest per gram"}
+        assert draft.content[1]["type"] == "image_url"

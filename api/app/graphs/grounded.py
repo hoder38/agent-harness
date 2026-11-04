@@ -20,6 +20,7 @@ from langgraph.types import interrupt
 
 from .. import state as rstate
 from ..media import display_text as media_display
+from ..media import image_parts
 from ..gates.jev_router import TASK_LABELS
 from ..memory import as_prompt as memory_prompt
 from ..models import LOCAL_MODELS
@@ -179,6 +180,9 @@ def lang_of(text: str) -> str:
     return "zh" if _CJK.search(text or "") else "en"
 
 
+IMAGE_TOKENS = 1500  # cost estimate per picture sent to a cloud model
+
+
 def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -254,10 +258,12 @@ def build_grounded_graph(
     products: Callable[..., Awaitable[dict]] | None = None,
     kb: Callable[..., Awaitable[list[dict]]] | None = None,
     recall: Callable[..., Awaitable[list[dict]]] | None = None,
+    pictures: Callable[[list[str]], Awaitable[list[dict]]] | None = None,
     clock: Callable[[], float] = time.time,
     max_turns: int = 20,
 ):
     search = search or src.search_web
+    pictures = pictures or image_parts
     fetch = fetch or src.fetch_source
     products = products or shopmod.search_products
     rag_cfg = policy.get("rag") or {}
@@ -337,7 +343,9 @@ def build_grounded_graph(
             raise Exhausted("time")
         price = prices.get(s.get("model", "local"), {"input": 0, "output": 0})
         p_in, p_out = float(price.get("input", 0)), float(price.get("output", 0))
-        est_in = (len(system) + sum(len(_text(m.content)) for m in msgs)) / 3
+        est_in = (len(system) + sum(len(_text(m.content)) for m in msgs)) / 3 + IMAGE_TOKENS * sum(
+            1 for m in msgs if isinstance(m.content, list) for p in m.content
+            if isinstance(p, dict) and p.get("type") == "image_url")
         est = (est_in * p_in + max_tokens * p_out) / 1e6
         if final:
             if budget["usd"] >= max_usd:  # the reserve exists so the answer can always be written
@@ -365,6 +373,14 @@ def build_grounded_graph(
                 prompt, config={"tags": tags, "run_name": f"{task}_nothink"})
             text = _text(msg.content)
         return text
+
+    async def with_pictures(s: GroundedState, text: str) -> HumanMessage:
+        """The turn's own photos go to cloud tiers as pictures too, so they read the layout instead of guessing
+        from flat OCR lines; local tiers and PRIVATE runs only get the extracted text (§5)."""
+        if s.get("private") or s.get("model", "local") in LOCAL_MODELS or not s.get("images"):
+            return HumanMessage(text)
+        parts = await pictures(s["images"])
+        return HumanMessage([{"type": "text", "text": text}, *parts]) if parts else HumanMessage(text)
 
     def finish_segment(s: GroundedState, budget: dict) -> dict:
         budget["active_ms"] = active_ms(s)
@@ -574,7 +590,7 @@ def build_grounded_graph(
                   "(including any clarifications). Do not add citations, URLs, or a sources list; state facts plainly "
                   "so they can be checked afterwards. " + lang_rule(s) + extra)
         msgs = plain_history(s["messages"], max_turns)
-        msgs = [*msgs[:-1], HumanMessage(s["question"])] if msgs else [HumanMessage(s["question"])]
+        msgs = [*msgs[:-1], await with_pictures(s, s["question"])]
         try:
             text = await call(s, budget, "draft", sysmsg, msgs, 1200)
         except Exhausted as e:
@@ -1011,7 +1027,7 @@ def build_grounded_graph(
             if s.get("check_failures"):
                 body_in += "\n\nYour previous answer failed these checks; fix them:\n- " + "\n- ".join(s["check_failures"])
             try:
-                body = await call(s, budget, "compose", sysmsg, [HumanMessage(body_in)], 1500, final=True)
+                body = await call(s, budget, "compose", sysmsg, [await with_pictures(s, body_in)], 1500, final=True)
             except Exhausted:
                 body = s.get("draft") or ""
             body = re.sub(r"<think>.*?</think>", "", body, flags=re.S).strip()
