@@ -268,6 +268,59 @@ async def test_line_video_is_stored_acked_and_deduped(redis, monkeypatch):
     assert replies[-1].startswith("無法下載這個檔案") and len(arq.jobs) == 1
 
 
+async def test_line_text_after_a_photo_is_its_question(redis, monkeypatch):
+    from app.jobs import media_jobs
+    from app.routes import line as line_route
+
+    async def fake_store(chunks, **kw):
+        return {"id": "p1", "kind": "image", "mime": "image/jpeg"}
+
+    async def fake_refs(ids, thread_id):
+        return [AttachmentRef(id=i, kind="image", mime="image/jpeg") for i in ids]
+
+    async def no_reply(token, text):
+        pass
+
+    monkeypatch.setattr(line_route.line, "reply", no_reply)
+    monkeypatch.setattr(line_route.line, "content", lambda mid, mx: _chunks(b""))
+    monkeypatch.setattr(media, "store", fake_store)
+    monkeypatch.setattr(media, "refs", fake_refs)
+    arq = FakeArq()
+    src = {"userId": "Uowner"}
+    photo = {"type": "message", "webhookEventId": "P", "replyToken": "R1", "source": src,
+             "message": {"type": "image", "id": "m1"}}
+    text = {"type": "message", "webhookEventId": "T", "replyToken": "R2", "source": src,
+            "message": {"type": "text", "id": "m2", "text": "這裡面是什麼"}}
+
+    async def no_enqueue(*a):
+        raise AssertionError("the text must not become a separate run")
+
+    await line_route.handle_event(photo, no_enqueue, arq)
+    await line_route.handle_event(text, no_enqueue, arq)
+    assert [j[0] for j in arq.jobs] == ["media_run"]          # merged, no second run
+    payload = arq.jobs[0][1][0]
+
+    async def get(ids):
+        return [att(id="p1", kind="image", text="兩盤菜", filename="image.jpeg")]
+
+    monkeypatch.setattr(media, "get", get)
+    sub = FakeArq()
+    await media_jobs.submit_media_run({"redis": sub}, payload)
+    fn, (p,), _ = sub.jobs[0]
+    assert fn == "run_agent" and p["text"].startswith("這裡面是什麼\n\n<untrusted")
+    assert p["delivery"]["reply_token"] == "R2"
+
+    # The photo run already answered: the next question gets the same photo attached again.
+    await line_route.handle_event({**photo, "webhookEventId": "P2"}, no_enqueue, arq)
+    run2 = arq.jobs[-1][1][0]["run_id"]
+    assert await media.take_text(run2) is None                # submitted before any text came
+    await line_route.handle_event({**text, "webhookEventId": "T2"}, no_enqueue, arq)
+    fn, (p,), _ = arq.jobs[-1]
+    assert fn == "media_run" and p["job"]["text"] == "這裡面是什麼" and p["job"]["attachments"][0]["id"] == "p1"
+
+    assert await media.line_followup(line_route.line.thread_id("Uowner")) is None   # one text per photo
+
+
 # ---------------------------------------------------------------- §16: file text never triggers actions
 def test_write_tools_need_the_owners_words():
     from types import SimpleNamespace

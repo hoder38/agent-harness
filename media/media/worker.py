@@ -1,5 +1,6 @@
 """arq worker for queue `arq:media` (§5): extract attachments, then hand the run to the agent worker."""
 import logging
+import time
 from typing import Any
 
 from arq import Retry, cron, func
@@ -51,9 +52,18 @@ async def media_run(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         return {"status": "cancelled"}
     q = "background" if any(k in heavy_kinds for k in kinds) else "interactive"
     qname = (_queues.get(q) or {}).get("name", f"arq:{q}")
-    await ctx["redis"].enqueue_job("submit_media_run", payload, _job_id=f"msub:{run_id}", _queue_name=qname)
+    await ctx["redis"].enqueue_job("submit_media_run", payload, _job_id=f"msub:{run_id}", _queue_name=qname,
+                                   _defer_by=_line_text_wait(job, payload.get("delivery") or {}, kinds))
     await common.emit(run_id, "status", {"status": "queued", "step": "attachments ready"})
     return {"status": "submitted", "kinds": kinds}
+
+
+def _line_text_wait(job: dict[str, Any], delivery: dict[str, Any], kinds: list[str]) -> float | None:
+    """A LINE file sent without text: give the owner's follow-up question time to arrive (merged by agent-api)."""
+    if job.get("channel") != "line" or (job.get("text") or "").strip() or kinds == ["voice"]:
+        return None
+    left = float(delivery.get("reply_ts") or 0) + float(common.cfg().get("line_text_wait_s", 15)) - time.time()
+    return left if left > 0 else None
 
 
 async def unload_idle(ctx: dict[str, Any]) -> None:

@@ -213,6 +213,13 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
   5 frames + transcript, correct summary; GAMING: image OCR-only in 0.4 s, routed `cloud_fast` by rule 5. LINE:
   content API reachable through squid (real 404 for a bad id; download errors now reply "無法下載…"); a full LINE
   media round trip is covered by tests only.
+- **LINE photo + question (2026-11-04, found live):** LINE delivers a photo and the text typed after it as two events,
+  so "這裡面是什麼" ran without the photo and was clarified, while the photo got the default prompt. Now a LINE
+  file sent without text (not voice) is noted for `media.line_follow_s` (60 s) and its hand-off waits until
+  `line_text_wait_s` (15 s) after it arrived (`_defer_by`). The next text (not a `/command`, not an answer to a
+  pending question) is offered to that run (`media:text:{run_id}`, SET NX); `submit_media_run` closes the slot and
+  uses it as the instruction with the text's fresh reply token. If the run was already submitted, the text starts a
+  new run with the same file attached (extraction cached). Only one text per file; multi-photo albums are separate runs.
 - **Not done:** cloud transcription / cloud vision fallbacks for voice and video (local CPU is always available);
   HEIC is decoded but not tested live; PDFs > 50 pages skip Docling (plain per-page text).
 

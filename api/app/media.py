@@ -250,6 +250,38 @@ async def start_run(job: Job, arq, *, delivery: dict[str, Any] | None = None, de
     return run_id
 
 
+# ---------------------------------------------------------------- LINE: photo, then the question as a separate message
+# LINE delivers "photo" and "what is this?" as two events. A file-only run waits `line_text_wait_s` for a text;
+# a text in that window becomes its instruction, a later one (within `line_follow_s`) gets the file attached again.
+_CLOSED = "\x00"
+
+
+async def note_line_media(thread_id: str, run_id: str, att_ids: list[str]) -> None:
+    await state.get_redis().set(f"line:media:{thread_id}", json.dumps({"run_id": run_id, "att_ids": att_ids}),
+                                ex=int(cfg().get("line_follow_s", 60)))
+
+
+async def line_followup(thread_id: str) -> dict[str, Any] | None:
+    """The file just sent in this LINE thread (taken once: only the next text is about it)."""
+    raw = await state.get_redis().getdel(f"line:media:{thread_id}")
+    return json.loads(raw) if raw else None
+
+
+async def offer_text(run_id: str, text: str, delivery: dict[str, Any]) -> bool:
+    """Give a waiting file-only run its instruction. False if that run has already been submitted."""
+    val = json.dumps({"text": text, "delivery": delivery}, ensure_ascii=False)
+    return bool(await state.get_redis().set(f"media:text:{run_id}", val, nx=True, ex=3600))
+
+
+async def take_text(run_id: str) -> dict[str, Any] | None:
+    """Called once when the run is submitted: closes the slot, returns a text offered before that."""
+    r = state.get_redis()
+    if await r.set(f"media:text:{run_id}", _CLOSED, nx=True, ex=3600):
+        return None
+    raw = await r.get(f"media:text:{run_id}")
+    return json.loads(raw) if raw and raw != _CLOSED else None
+
+
 async def refs(ids: list[str], thread_id: str) -> list[AttachmentRef]:
     """Validate attachment ids for a run: they must exist and belong to this thread (or to none yet)."""
     rows = await get(ids)

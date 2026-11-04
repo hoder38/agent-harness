@@ -36,6 +36,8 @@ async def handle_event(ev: dict[str, Any], enqueue: pipeline.Enqueue, arq: Any =
         if reply_token:
             await line.reply(reply_token, "目前只支援文字、語音、圖片、影片和檔案。")
         return
+    if arq is not None and await _about_recent_file(job, delivery, arq):
+        return
     res = await pipeline.submit(job, enqueue, delivery=delivery)
     if res.duplicate:
         return
@@ -48,6 +50,29 @@ async def handle_event(ev: dict[str, Any], enqueue: pipeline.Enqueue, arq: Any =
 
 
 MEDIA_TYPES = {"image", "audio", "video", "file"}
+
+
+async def _about_recent_file(job: Job, delivery: dict[str, Any], arq: Any) -> bool:
+    """A text right after a file is its question: merge it into the waiting run, or (if that run already
+    answered) start a new run with the same file attached. Commands and answers to a question are left alone."""
+    r = state.get_redis()
+    if job.text.lstrip().startswith("/") or await state.get_pending(r, job.thread_id):
+        return False
+    recent = await media.line_followup(job.thread_id)
+    if not recent:
+        return False
+    try:
+        att_refs = await media.refs(recent["att_ids"], job.thread_id)
+    except media.MediaError:
+        return False
+    if not await state.dedupe(r, job.dedupe_key):
+        return True
+    if await media.offer_text(recent["run_id"], job.text, delivery):
+        log.info("LINE text merged into media run %s", recent["run_id"])
+        return True
+    job.attachments = att_refs
+    await media.start_run(job, arq, delivery=delivery, deduped=True)
+    return True
 
 
 async def _handle_media(msg: dict[str, Any], job: Job, delivery: dict[str, Any], arq: Any) -> None:
@@ -72,6 +97,8 @@ async def _handle_media(msg: dict[str, Any], job: Job, delivery: dict[str, Any],
     job.text = ""
     job.attachments = await media.refs([att["id"]], job.thread_id)
     run_id = await media.start_run(job, arq, delivery=delivery, deduped=True)
+    if run_id and att["kind"] != "voice":   # a LINE voice note is the message itself
+        await media.note_line_media(job.thread_id, run_id, [att["id"]])
     if run_id and media.is_heavy(att["kind"]) and reply_token:
         # Video and large files take a while: ack now with the free reply token, push the answer later.
         await line.reply(reply_token, "⏳ 處理中,完成後會通知你。")

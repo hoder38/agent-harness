@@ -51,6 +51,9 @@ async def submit_media_run(ctx: dict[str, Any], payload: dict[str, Any]) -> dict
     delivery: dict[str, Any] = payload.get("delivery") or {}
     if await state.is_cancelled(r, run_id) or (await state.get_run_meta(r, run_id) or {}).get("status") == "cancelled":
         return {"status": "cancelled"}
+    if job.channel == "line" and not (job.text or "").strip() and (extra := await media.take_text(run_id)):
+        job.text = extra["text"]   # the owner's question sent right after the file (fresh reply token too)
+        delivery = {**delivery, **(extra.get("delivery") or {})}
 
     atts = await media.get([a.id for a in job.attachments])
     await _index_large_docs(atts)

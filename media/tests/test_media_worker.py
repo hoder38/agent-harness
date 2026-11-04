@@ -99,7 +99,7 @@ async def test_media_run_hands_off_to_the_right_queue(redis, rows, monkeypatch):
     arq = FakeArq()
     payload = {"run_id": "r1", "job": {"attachments": [{"id": "img", "kind": "image"}]}}
     assert (await worker.media_run({"redis": arq}, payload))["status"] == "submitted"
-    assert arq.jobs[-1][0] == "submit_media_run" and arq.jobs[-1][2] == {"_job_id": "msub:r1",
+    assert arq.jobs[-1][0] == "submit_media_run" and arq.jobs[-1][2] == {"_job_id": "msub:r1", "_defer_by": None,
                                                                          "_queue_name": "arq:interactive"}
     payload = {"run_id": "r2", "job": {"attachments": [{"id": "big", "kind": "doc"}]}}
     await worker.media_run({"redis": arq}, payload)
@@ -111,3 +111,14 @@ async def test_media_run_stops_when_cancelled(redis, rows):
     arq = FakeArq()
     out = await worker.media_run({"redis": arq}, {"run_id": "r3", "job": {"attachments": [{"id": "a", "kind": "doc"}]}})
     assert out["status"] == "cancelled" and not arq.jobs
+
+
+def test_line_file_without_text_waits_for_the_question():
+    import time
+    now = time.time()
+    wait = worker._line_text_wait({"channel": "line", "text": ""}, {"reply_ts": now - 5}, ["image"])
+    assert 9 < wait <= 10
+    assert worker._line_text_wait({"channel": "line", "text": ""}, {"reply_ts": now - 60}, ["image"]) is None
+    assert worker._line_text_wait({"channel": "line", "text": "這是什麼"}, {"reply_ts": now}, ["image"]) is None
+    assert worker._line_text_wait({"channel": "line", "text": ""}, {"reply_ts": now}, ["voice"]) is None
+    assert worker._line_text_wait({"channel": "web", "text": ""}, {"reply_ts": now}, ["image"]) is None

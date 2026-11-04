@@ -167,6 +167,8 @@ media:
   max_chars: 8000                     # attachment text in the model prompt (split over the files; rest truncated)
   router_chars: 1200                  # cap for a voice note used as the message (router sees no file content)
   voice_as_message_s: 120             # a voice note this short (or any LINE voice) with no typed text IS the request
+  line_text_wait_s: 15                # LINE sends photo and question separately: a file-only run waits this long for a text
+  line_follow_s: 60                   # a text within this time of a LINE file is about it (later: re-attached, cached)
   max_jobs: 2
   vision_model: qwen3.5:9b            # Ollama; vision verified (§17)
   default_prompts:                    # when only a file is sent
