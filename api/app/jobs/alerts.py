@@ -13,12 +13,23 @@ from ..settings import get_settings
 log = logging.getLogger(__name__)
 
 
+def is_quiet(key: str, pol: dict[str, Any] | None = None) -> bool:
+    """Keys under `alerts.quiet_prefixes` are only logged, then reported in the morning brief (no LINE, no Inbox)."""
+    prefixes = ((pol or config.policy()).get("alerts") or {}).get("quiet_prefixes") or []
+    return any(key.startswith(p) for p in prefixes)
+
+
 async def send_alert(key: str, message: str, *, dedupe_s: int | None = None) -> bool:
-    """Send at most one alert per `key` per dedupe window. Returns True if sent."""
+    """Send at most one alert per `key` per dedupe window. Returns True if sent (or logged, for quiet keys)."""
     r = state.get_redis()
-    dedupe_s = dedupe_s or int(config.policy().get("alerts", {}).get("dedupe_s", 3600))
+    pol = config.policy()
+    dedupe_s = dedupe_s or int(pol.get("alerts", {}).get("dedupe_s", 3600))
     if not await r.set(f"alert:{key}", "1", nx=True, ex=dedupe_s):
         return False
+    if is_quiet(key, pol):
+        log.warning("ALERT (quiet) %s: %s", key, message)
+        await db.log_alert(key, message, False)
+        return True
     s = get_settings()
     delivered = False
     if s.line_owner_user_id and s.line_channel_access_token:

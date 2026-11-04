@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-05.7
+version: 2026-11-05.8
 
 thresholds:
   clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -180,6 +180,7 @@ gpu_governor:                # phase 4 (§11): app/governor.py, compose service 
 alerts:
   dedupe_s: 3600
   queue_age_s: 300
+  quiet_prefixes: ["queue:"]   # logged only, listed in the next morning brief (no LINE push / Inbox item)
 
 rag:                         # phase 10 (§10): app/rag/, docs folder DOCS_DIR -> /docs, reranker service
   enabled: true

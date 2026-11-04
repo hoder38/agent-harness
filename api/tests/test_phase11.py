@@ -133,3 +133,29 @@ def test_eval_pass_and_regressions():
     assert answer_eval.regressions(prev, 10, 0.86, c) == []
     assert answer_eval.regressions(prev, 9, 0.8, c) == ["answers passed 11 → 9", "KB recall@5 0.90 → 0.80"]
     assert answer_eval.regressions({"passed": 11, "metrics": {}}, 11, 0.1, c) == []
+
+
+def test_brief_reports_quiet_alerts():
+    at = tp(2026, 11, 4, 2, 41)
+    quiet = [{"created_at": at, "key": "queue:arq:background:stale",
+              "message": "queue arq:background has a job waiting 324s"}]
+    full, notice = brief.compose(day=tp(2026, 11, 4, 7), weather_lines=[], events=None, overdue=[], due=[],
+                                 counts={}, spend=None, quiet=quiet)
+    assert "11/04 02:41 queue arq:background has a job waiting 324s" in full and "1 個未推播" in notice
+
+
+async def test_quiet_alert_is_logged_not_pushed(redis, monkeypatch):
+    from app import config, db
+    from app.jobs import alerts
+
+    pushed, logged, added = [], [], []
+    monkeypatch.setattr(config, "policy", lambda: {"alerts": {"quiet_prefixes": ["queue:"]}})
+    monkeypatch.setattr(alerts.line, "push", lambda *a: pushed.append(a))
+    monkeypatch.setattr(alerts.inbox, "add", lambda *a, **k: added.append(a))
+
+    async def log_alert(key, message, delivered):
+        logged.append((key, delivered))
+    monkeypatch.setattr(db, "log_alert", log_alert)
+    assert await alerts.send_alert("queue:q:stale", "waiting")
+    assert not await alerts.send_alert("queue:q:stale", "waiting")  # still deduplicated
+    assert logged == [("queue:q:stale", False)] and not pushed and not added

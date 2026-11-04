@@ -69,8 +69,18 @@ async def _inbox_counts() -> dict[str, int]:
         return dict(await cur.fetchone())
 
 
+async def _quiet_alerts(since: datetime) -> list[dict[str, Any]]:
+    """Alerts that were only logged (policy `alerts.quiet_prefixes`, e.g. a long job waiting in a queue)."""
+    from .jobs.alerts import is_quiet
+    async with db.get_pool().connection() as conn:
+        cur = await conn.execute("SELECT created_at, key, message FROM alerts WHERE created_at >= %s AND NOT delivered "
+                                 "ORDER BY created_at", (since,))
+        return [a for a in await cur.fetchall() if is_quiet(a["key"])]
+
+
 def compose(*, day: datetime, weather_lines: list[str], events: list[dict] | None, overdue: list[dict],
-            due: list[dict], counts: dict[str, int], spend: float | None) -> tuple[str, str]:
+            due: list[dict], counts: dict[str, int], spend: float | None,
+            quiet: list[dict] | None = None) -> tuple[str, str]:
     """(full brief for the web, LINE notice without any calendar/todo text)."""
     head = f"☀️ 早安！{day:%m/%d}（{WEEKDAY[day.weekday()]}）"
     full, notice = [head, "", "🌤 天氣"], [head]
@@ -90,6 +100,10 @@ def compose(*, day: datetime, weather_lines: list[str], events: list[dict] | Non
              f"{counts.get('waiting', 0)} 個等你回覆" if counts.get("waiting") else None,
              f"{counts.get('verify', 0)} 個回答未通過檢查" if counts.get("verify") else None]
     notice += ["今天：" + "、".join(p for p in parts if p)]
+    if quiet:
+        full += ["", f"🔕 過去 24 小時記錄的提醒（{len(quiet)}，未推播）"]
+        full += [f"- {a['created_at'].astimezone(todos.TZ):%m/%d %H:%M} {a['message']}" for a in quiet[-10:]]
+        notice += [f"🔕 {len(quiet)} 個未推播的系統提醒（如任務排隊過久）"]
     if spend is not None:
         full += ["", f"💰 昨日花費 US${spend:.2f}"]
         notice += [f"昨日花費 US${spend:.2f}"]
@@ -122,8 +136,9 @@ async def run(now: datetime | None = None) -> dict[str, Any]:
     overdue, due = due_todos(await todos.list_("open"), day_end, now)
     counts = await _inbox_counts()
     spend = await _spend(day - timedelta(days=1), day) if c.get("spend", True) else None
+    quiet = await _quiet_alerts(now - timedelta(hours=24))
     full, notice = compose(day=day, weather_lines=weather_lines, events=events, overdue=overdue, due=due,
-                           counts=counts, spend=spend)
+                           counts=counts, spend=spend, quiet=quiet)
     msg_id = f"brief-{day:%Y%m%d}"  # the same id replaces a brief re-run on the same day
     r = state.get_redis()
     await state.mark_thread_private(r, THREAD)
