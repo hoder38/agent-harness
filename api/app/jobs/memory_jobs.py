@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage
 
 from .. import config, db, inbox, memory, state
 from ..llm.client import make_llm
-from ..rag import indexer
+from ..rag import indexer, vault
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,10 @@ async def summarize_episode(ctx: dict[str, Any], payload: dict[str, Any]) -> dic
 
 
 async def index_docs_job(ctx: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return await indexer.index_docs()
+    out = {"docs": await indexer.index_docs()}
+    if (config.policy().get("vault") or {}).get("enabled"):
+        out["vault"] = await vault.index_vault(wait_s=300)
+    return out
 
 
 # ---------------------------------------------------------------- scheduler crons
@@ -108,6 +111,8 @@ async def index_docs_cron(ctx: dict[str, Any]) -> None:
     if time.gmtime().tm_min % every:
         return
     await indexer.index_docs()
+    if (config.policy().get("vault") or {}).get("enabled"):
+        await vault.index_vault()   # fallback for changes the vault-indexer watcher missed
 
 
 async def episodes_cron(ctx: dict[str, Any]) -> None:

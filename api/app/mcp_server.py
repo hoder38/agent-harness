@@ -1,7 +1,7 @@
 """`harness-memory` MCP server (§9c): the owner's harness memory for Copilot CLI over SSH.
 
 Served by agent-api at `/mcp` (streamable HTTP, host-only port 127.0.0.1:8100, harness token). Copilot is a cloud
-model, so PRIVATE memories are never returned.
+model, so PRIVATE memories and vault notes are never returned (NORMAL text is Gate 0 redacted).
 """
 import logging
 from typing import Any
@@ -71,13 +71,40 @@ async def add_todo(title: str, due: str | None = None, notes: str = "") -> str:
     return f"Added todo #{t['id']}: {t['title']}"
 
 
+async def search_notes(query: str, k: int = 6) -> str:
+    """Search the owner's Obsidian vault notes (§10a). Each hit has a cite label [[Note#Heading]]; read the whole
+    note with read_note. Private notes are never returned."""
+    if not (config.policy().get("vault") or {}).get("enabled"):
+        return "The vault is turned off."
+    from .rag import store
+
+    hits = await store.search(query, private=False, k=max(1, min(int(k or 6), 20)), source="vault")
+    await db.audit("vault", "mcp_search", {"paths": [h["path"] for h in hits]})
+    if not hits:
+        return "No matching notes."
+    return '<untrusted source="vault">\n' + store.to_json(hits) + "\n</untrusted>"
+
+
+async def read_note(path: str) -> str:
+    """Read one note of the owner's Obsidian vault by path ("Projects/Harness.md") or name ("Harness").
+    Private notes are refused."""
+    if not (config.policy().get("vault") or {}).get("enabled"):
+        return "The vault is turned off."
+    from .rag import vault
+
+    target = path.strip().removeprefix("[[").removesuffix("]]").split("#", 1)[0].split("|", 1)[0]
+    text, err = await vault.read_note(target, private=False)
+    await db.audit("vault", "mcp_read", {"path": target[:200], "ok": not err})
+    return f"Cannot read {path!r}: {err}" if err else f'<untrusted source="vault">\n{text}\n</untrusted>'
+
+
 def build() -> FastMCP:
     srv = FastMCP(
         "harness-memory", stateless_http=True, json_response=True, streamable_http_path=MCP_PATH,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=["127.0.0.1:*", "localhost:*"],
             allowed_origins=["http://127.0.0.1:*", "http://localhost:*"]))
-    for fn in (recall, remember, get_thread_summary, list_todos, add_todo):
+    for fn in (recall, remember, get_thread_summary, list_todos, add_todo, search_notes, read_note):
         srv.tool()(fn)
     return srv
 

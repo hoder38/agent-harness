@@ -517,7 +517,7 @@ Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and
 ### Implemented 2026-10-29 (phase 10)
 
 **Knowledge base (`api/app/rag/`)**
-- Corpus: a read-only docs folder (`DOCS_DIR`, default `~/agent-docs`, mounted at `/docs`) plus uploads via `POST /api/agent/kb/documents` (stored in Postgres only). The vault in §10a will be a second root.
+- Corpus: a read-only docs folder (`DOCS_DIR`, default `~/agent-docs`, mounted at `/docs`) plus uploads via `POST /api/agent/kb/documents` (stored in Postgres only). The vault (§10a) is a second root (`source = vault`).
 - `index_docs_cron` rescans every `rag.index_interval_min` (5) minutes under a Redis lock. A file is re-indexed only when its hash changes. The hash covers the text, chunk settings, `chunking.VERSION` and embed model. Embeddings are reused per (model, title, chunk hash). Files that disappear are removed, but nothing is removed when the root itself is missing.
 - Chunking is heading-aware, ≤ 800 tokens with 15% paragraph overlap. Each section is chunked on its own so a citation's heading is exact, which means many chunks are under 400 tokens. A tiny intro is merged only into its own following subsection, never into a sibling.
 - Embeddings: `qwen3-embedding:0.6b` via Ollama (1024 dims, HNSW). Queries get the instruct prefix. While GAMING the model is loaded with `num_gpu: 0`.
@@ -606,6 +606,37 @@ vault/
 4. Validate: page count vs Notion, broken-link report, spot-check databases and embeds.
 5. Index into RAG; keep Notion read-only for ~1 month, then archive.
 
+### Implemented 2026-11-04 (phase 10a)
+
+**Mounts & services** (`VAULT_DIR`, default `/home/hoder/vault`; `host/vault-init.sh` creates the folders, `.gitignore`, `.stignore`, `Inbox/README.md` and the git repo — run it before `compose up`, the bind mounts need `Inbox/` and `AI/`)
+- Every app container: vault at `/vault` **read-only**, plus `Inbox/` and `AI/` at `/vault-rw/Inbox|AI` read-write. Nothing else in the vault is writable from a worker.
+- `agent-api` only: the whole vault at `/vault-edit` read-write, used by exactly one code path, applying an owner-approved edit (Inbox approve).
+- `vault-indexer` service (`python -m app.rag.watcher`, ro vault): full scan at start, then `watchfiles` → debounce (`vault.debounce_ms` 2 s) → `index_changed`. Ignores hidden files, Syncthing temp files and the writer's `.~harness-*` temp files. Heartbeat in Redis for the healthcheck. The 5-minute `index_docs_cron` also rescans the vault (safety net); a missing mount never deletes the index.
+- `syncthing` service (`syncthing/syncthing:2`, uid 1000): volume at `/var/syncthing` (the image only chowns `$HOME`; config in `/var/syncthing/config`), vault at `/var/syncthing/vault`, folder id `vault`, staggered versioning, fs watcher on. GUI on host `127.0.0.1:8384` only (SSH tunnel); 22000 tcp/udp + 21027/udp for sync. The only service besides egress-proxy on `egress`.
+- Host: `agent-vault-commit.timer` (00:15) runs `host/vault-commit.sh` → one `vault: YYYY-MM-DD (n files)` commit per day. `backup.sh` copies the vault (with `.git`) and the syncthing volume.
+
+**Indexing** (`app/rag/vault.py`; chunks/documents with `source = 'vault'`, path = vault-relative)
+- Frontmatter (`tags`, `aliases`, `privacy`), inline `#tags` (not in code), `[[wikilinks]]`, `![[embeds]]`, `[md](links.md)`. Tags and aliases are stored on the document and added to the keyword index; a query that equals a note's title or alias always keeps that note (exact "named" match, even below the rerank floor).
+- Link resolution like Obsidian: exact path → path suffix → shallowest note of that name; relative md links resolved from the note. `note_links(src, dst, dst_path)` (dst unresolved until the note exists). Search seeds `rag.link_seeds` (3) top hits and adds up to `rag.link_candidates` (3) chunks of 1-hop linked notes, forward or backlink, before rerank.
+- Rendered text for chunking: wikilinks → their display text, embeds → `📎 name`. Embedded attachments (`vault.attachment_kinds`: doc, image; ≤ 50 MB) go to the media-worker (stored with `private=True`, so local only); the extracted text is indexed under the embedding note as heading `📎 name` and cached by sha in `vault_files`. An attachment change reindexes the notes that embed it.
+- Privacy: frontmatter, `privacy_rules.yaml` `private_paths` (vault-relative globs), Gate 0 content scan → `privacy_tag`. `AI/Daily/` is always private.
+- Citations: `[[Note#Heading]]` (vault path without `.md`, last heading); attachment text cites `[[file.pdf]]`.
+- Measured: a file edit is searchable ~0.3 s after the write (watcher), well inside the 1-minute target.
+
+**Writing** (`app/vault_writer.py`; agent tools in `app/tools/vault.py`)
+- `capture_note(text, title?, tags?)` → `Inbox/YYYY-MM-DD HHmm title.md`; `append_daily_note(text)` → `## Log` of `AI/Daily/<today>.md`; `edit_note(path, old, new)` — exact single-occurrence replace. Assistant route only (with todos); `read_note` on knowledge routes. `/note <text>` saves to Inbox directly (works on LINE).
+- Writes resolve under `/vault-rw/<Inbox|AI>` with a realpath containment check (symlinks out are refused) and an atomic temp+rename. Privacy only ever upgrades (a private thread or private text → `privacy: private`).
+- `edit_note` outside `Inbox/`/`AI/` creates an Inbox approval item with a unified diff and `detail.vault_edit {path, old, new, base_sha}` (deduplicated; LINE push without content if `vault.notify_line`). Approve applies it through `/vault-edit` only if the file sha is unchanged (else 409, re-propose); dismiss = reject; audited (`vault_edit`).
+- Nightly `vault_daily` schedule (23:50): `app/vault_daily.py` writes the summary block (between `<!-- harness:summary -->` markers, so the `## Log` survives) of that day's conversations, coding sessions, todos done and Inbox captures.
+
+**Copilot / MCP**: `search_notes(query, k)` (vault only, never PRIVATE, redacted, wrapped `<untrusted>`) and `read_note(path)` (path traversal refused, PRIVATE notes refused) on the `harness-memory` MCP server.
+
+**Notion** (verified 2026-11-04): the official Obsidian Importer supports both the Notion **API** (integration token `ntn_…`; databases become folders + a `.base` file, primary view only) and the HTML zip export (choose HTML, *Include everything*, *Create folders for subpages*; databases flattened). Import into `Notion/`, then `python -m app.tools.vault_tool notion-fix [--strip-ids] [--dry-run]` (md links → wikilinks, frontmatter `source: notion` + `notion_id`, optional removal of the 32-hex id from file names with link rewrite) and `vault_tool links --folder Notion` (broken-link report, exit 1 if any; `--all` also counts wikilinks to notes not written yet).
+
+**Verified live 2026-11-04**: phone-style edit → indexed in 0.3 s; tags/aliases/links stored; alias query hit; 1-hop expansion both directions; MCP tools over HTTP; worker has no write access outside `Inbox/`/`AI/` (read-only FS error on `/vault`, no `/vault-edit`); `/note`, capture and daily writes owned by uid 1000; an edit to `Notes/` became an Inbox diff and applied once on approve (second approve refused); nightly daily note + vault commit; PDF/text embed extracted by media-worker and cited. `rag_eval` is pinned to `source: docs` per case (default), unchanged at recall@5 1.00 / 0.88.
+
+**Not done / follow-ups**: browser Obsidian container (optional; Obsidian desktop/mobile via Syncthing instead); §12 verify-mode `kb_search`/`kb_read` for PRIVATE threads still return "local KB not available" (cite_only mode already cites the vault); Notion import itself is a manual owner step.
+
 ## 11. GPU governor
 
 Container with NVML access (`capabilities: [utility]`) and read-only Docker events via socket proxy.
@@ -683,7 +714,7 @@ Owner preferences, applied to **every** answer:
 3. **Insufficient evidence → partial answer** with unverified content explicitly labelled.
 
 Claims are classified first: greetings, creative writing, opinion, pure reasoning/math are `exempt` (no source); every factual claim needs a citation or an "unverified" label.
-PRIVATE threads never use web tools; they may cite only the local knowledge base (§10a). Until that ships (phase 10/10a), every factual claim on a PRIVATE thread is labelled unverified.
+PRIVATE threads never use web tools; they may cite only the local knowledge base (§10a). In the default `cite_only` mode they cite the docs folder and vault (phase 10/10a); in verify mode every factual claim on a PRIVATE thread is still labelled unverified (follow-up, see below).
 
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:
@@ -791,7 +822,7 @@ async def fetch_source(url: str, *, focus: list[str], max_chars=8000,
 - **Focus windows:** ±600 chars around matches of claim keywords/numbers, merged up to `max_chars` (avoids the fixed head truncation cutting the evidence).
 - HTTP 429/errors still consume one unit (no retry loops). PDFs are unsupported for now → claim unverified ("primary source is a PDF"); Docling later.
 - `published_at` from `article:published_time`, `<time datetime>`, or `Last-Modified`.
-- PRIVATE: `kb_search()` / `kb_read()` with the same interfaces (`domain = vault:<path>`); until §10a ships they return `error="local KB not available"`. (Phase 10: in the default `cite_only` mode, private threads already cite the owner's KB from §10, with no web; verify mode below is unchanged.)
+- PRIVATE: `kb_search()` / `kb_read()` with the same interfaces (`domain = vault:<path>`); they still return `error="local KB not available"` (follow-up: back them with `store.search(private=True)` now that §10a has shipped). (Phase 10: in the default `cite_only` mode, private threads already cite the owner's KB from §10, with no web; verify mode below is unchanged.)
 
 ### Authority tiers (`config/authority.yaml`) — rules first, LLM only for edge cases
 ```yaml
@@ -897,7 +928,7 @@ Deviations from, and details beyond, the design above:
   - LLM history is plain user/assistant text (`plain_history`; no tool messages).
 - **Sources and privacy:**
   - Only T1 candidates are fetched.
-  - On PRIVATE threads, every factual claim is labelled unverified (`private_kb`) until §10a ships.
+  - On PRIVATE threads, every factual claim is labelled unverified (`private_kb`) until `kb_search` is wired (follow-up after §10a).
 - **Streaming:**
   - Only `compose` tokens are streamed. A retry emits SSE `reset` first.
   - Exempt-only answers (e.g. greetings) arrive in `done` only.
@@ -1128,14 +1159,16 @@ services:
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
     networks: [agent]
   syncthing:                             # vault sync to laptop/phone
-    image: syncthing/syncthing
-    volumes: ["/home/hoder/vault:/var/syncthing/vault", "syncthing:/var/syncthing/config"]
-    ports: ["22000:22000/tcp", "22000:22000/udp", "127.0.0.1:8384:8384"]
+    image: syncthing/syncthing:2
+    volumes: ["/home/hoder/vault:/var/syncthing/vault", "syncthing:/var/syncthing"]   # image chowns only $HOME
+    ports: ["22000:22000/tcp", "22000:22000/udp", "21027:21027/udp", "127.0.0.1:8384:8384"]
     networks: [egress]
-  # agent-worker additionally mounts:
-  #   /home/hoder/vault:/vault:ro                 (indexer)
+  vault-indexer:                         # python -m app.rag.watcher (§10a)
+  # every app container additionally mounts:
+  #   /home/hoder/vault:/vault:ro                 (indexer, read_note)
   #   /home/hoder/vault/Inbox:/vault-rw/Inbox     (writer)
   #   /home/hoder/vault/AI:/vault-rw/AI           (writer)
+  # agent-api only: /home/hoder/vault:/vault-edit (applies owner-approved edits)
   # agent-api, agent-worker, media-worker mount /srv/agent/files:/files
   # agent-api, agent-worker, media-worker, sandboxes set:
   #   HTTPS_PROXY=http://egress-proxy:4750  NO_PROXY=litellm,ollama,agent-postgres,agent-redis,phoenix
@@ -1193,7 +1226,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 8c | Shopping: clarify item/budget, recommend real store listings (§12c) — **implemented 2026-10-28** (web only; LINE is chat-only, no shopping branch) | A missing budget is asked with option buttons; every pick is a real listing with code-rendered price/store/link; 「cheaper」 lowers the ceiling; unrelated listings are filtered |
 | 9 | Media: voice, image, doc, then video — **implemented 2026-11-04**, live-verified (§5: image, voice, docx, scanned + 25-page PDF, video in background; GAMING → CPU int8 ASR and OCR-only images; nodeReact attach button) | Each modality produces text; video runs as background job; CPU path works while GAMING |
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
-| 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
+| 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import — **implemented 2026-11-04**, live-verified (§10a: edit → indexed in 0.3 s; writes only via `/vault-rw/Inbox|AI`, other edits by Inbox approval; Notion import tooling ready, import itself pending) | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
 | 11 | Cron/events, eval suite in CI, monthly restore test — **implemented 2026-11-04**, live-verified (brief → web thread + Inbox + LINE notice; restore test OK in 4 s) | Morning brief runs; eval regression check; restore test passes |
 

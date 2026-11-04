@@ -84,6 +84,16 @@ async def answer_item(item_id: int, body: AnswerBody, request: Request, owner: s
             raise HTTPException(502, str(e))
         await inbox.set_status(item_id, "done")
         return {"ok": True, "result": done}
+    if (item.get("detail") or {}).get("vault_edit") and item["status"] == "open":   # approved note edit (§10a); reject = dismiss
+        from .. import db, vault_writer
+
+        try:
+            done = vault_writer.apply_approved(item["detail"])
+        except vault_writer.VaultWriteError as e:
+            raise HTTPException(409, str(e))
+        await db.audit("vault", "apply_edit", {"path": item["detail"]["vault_edit"]["path"], "item": item_id})
+        await inbox.set_status(item_id, "done")
+        return {"ok": True, "result": done}
     if item["kind"] not in inbox.ACTIONABLE or not item["run_id"]:
         raise HTTPException(409, "this item has nothing to answer")
     if item["status"] != "open":

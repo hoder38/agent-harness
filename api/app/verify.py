@@ -23,7 +23,8 @@ log = logging.getLogger(__name__)
 
 NOUL = "The response fully and correctly answers the request"
 ESCALATION = {"local": "cloud_fast", "local_cpu": "cloud_fast", "cloud_fast": "cloud_strong"}
-WRITE_TOOLS = {"add_todo", "complete_todo", "add_event", "delete_event", "remember"}
+WRITE_TOOLS = {"add_todo", "complete_todo", "add_event", "delete_event", "remember", "capture_note",
+               "append_daily_note", "edit_note"}
 # Common characters that only occur in Simplified Chinese (their Traditional forms differ, and none of them is
 # itself a normal Traditional character such as 后/里/干/台/范/于/只/系).
 _SIMPLIFIED = set(

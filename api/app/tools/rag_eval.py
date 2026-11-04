@@ -50,7 +50,9 @@ async def run(cases: list[dict[str, Any]], k: int, use_rerank: bool, verbose: bo
     t0 = time.monotonic()
     for c in cases:
         expect = c["expect"] if isinstance(c["expect"], list) else [c["expect"]]
-        hits = await store.search(c["q"], private=True, k=k, use_rerank=use_rerank)
+        src = c.get("source", "docs")  # pinned so new vault notes do not shift a docs-only baseline
+        hits = await store.search(c["q"], private=True, k=k, use_rerank=use_rerank,
+                                  source=None if src == "any" else src)
         rank = first_rank(hits, expect)
         ranks.append(rank)
         detail.append({"q": c["q"], "expect": expect, "rank": rank, "top": [store.cite_label(h) for h in hits]})

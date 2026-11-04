@@ -26,7 +26,7 @@ SCHEMA = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS documents (
     id          BIGSERIAL PRIMARY KEY,
-    source      TEXT NOT NULL,            -- docs | upload (| vault in 10a)
+    source      TEXT NOT NULL,            -- docs | upload | vault
     path        TEXT NOT NULL,
     title       TEXT,
     hash        TEXT NOT NULL,            -- raw text + privacy + chunker params: re-index when it changes
@@ -55,6 +55,28 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS chunks_doc ON chunks (doc_id);
 CREATE INDEX IF NOT EXISTS chunks_tsv ON chunks USING gin (tsv);
 CREATE INDEX IF NOT EXISTS chunks_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS tags TEXT[];
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS aliases TEXT[];
+-- §10a vault: Obsidian keys of a note path ("Notes/My Note.md" → "notes/my note" and "my note")
+CREATE OR REPLACE FUNCTION vault_path_key(p TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS
+  $$ SELECT lower(regexp_replace(p, '\\.(md|markdown)$', '', 'i')) $$;
+CREATE OR REPLACE FUNCTION vault_name_key(p TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS
+  $$ SELECT lower(regexp_replace(regexp_replace(p, '^.*/', ''), '\\.(md|markdown)$', '', 'i')) $$;
+CREATE TABLE IF NOT EXISTS note_links (
+    src         TEXT NOT NULL,            -- vault path of the linking note
+    dst         TEXT NOT NULL,            -- target key (vault.link_key): a vault path or a bare name, lower-case
+    kind        TEXT NOT NULL,            -- link | embed
+    raw         TEXT NOT NULL,            -- target as written (broken-link report)
+    PRIMARY KEY (src, dst, kind)
+);
+CREATE INDEX IF NOT EXISTS note_links_dst ON note_links (dst);
+CREATE TABLE IF NOT EXISTS vault_files (     -- embedded attachments: hashed once, extracted by the media-worker
+    path        TEXT PRIMARY KEY,
+    size        BIGINT NOT NULL,
+    mtime       DOUBLE PRECISION NOT NULL,
+    sha256      TEXT NOT NULL,
+    att_id      TEXT
+);
 CREATE TABLE IF NOT EXISTS rag_eval_runs (
     id          BIGSERIAL PRIMARY KEY,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -86,6 +108,11 @@ def doc_privacy(path: str, meta: dict[str, Any], text: str, rules: dict[str, Any
     for d in rules.get("private_doc_dirs") or []:
         if d.strip("/").lower() in parts:
             return "PRIVATE", f"folder {d}/"
+    low_path = path.lower()
+    for pre in rules.get("private_paths") or []:
+        pre = str(pre).strip("/").lower()
+        if pre and (low_path == pre or low_path.startswith(pre + "/")):
+            return "PRIVATE", f"path {pre}/"
     low = text.lower()
     for kw in rules.get("private_keywords") or []:
         if kw.lower() in low:
@@ -115,14 +142,17 @@ def _date(meta: dict[str, Any], fallback: datetime | None) -> datetime | None:
 
 async def upsert_document(*, source: str, path: str, raw: str, rules: dict[str, Any],
                           mtime: datetime | None = None, store_content: bool = False,
-                          title: str | None = None, force_private: bool = False) -> dict[str, Any]:
-    """Index one document; unchanged documents (same hash) are skipped. Unchanged chunks keep their embedding."""
+                          title: str | None = None, force_private: bool = False, kw_extra: str = "",
+                          tags: list[str] | None = None, aliases: list[str] | None = None) -> dict[str, Any]:
+    """Index one document; unchanged documents (same hash) are skipped. Unchanged chunks keep their embedding.
+    `kw_extra` (vault tags/aliases) is added to every chunk's keyword text."""
     cfg = rag_cfg()
     meta, body = chunking.split_frontmatter(raw)
     privacy, why = ("PRIVATE", "marked private") if force_private else doc_privacy(path, meta, raw, rules)
     params = (chunking.VERSION, cfg.get("chunk_min_tokens", 400), cfg.get("chunk_max_tokens", 800),
               cfg.get("chunk_overlap", 0.15), cfg.get("embed_model"))
-    h = chunking.sha256(raw + "\x00" + privacy + "\x00" + repr(params))  # new chunker/params/model → re-index
+    h = chunking.sha256(raw + "\x00" + privacy + "\x00" + repr(params)
+                        + ("\x00" + kw_extra if kw_extra else ""))  # new chunker/params/model → re-index
     async with db.get_pool().connection() as conn:
         cur = await conn.execute("SELECT id, hash FROM documents WHERE source=%s AND path=%s", (source, path))
         row = await cur.fetchone()
@@ -146,13 +176,15 @@ async def upsert_document(*, source: str, path: str, raw: str, rules: dict[str, 
         async with conn.transaction():
             cur = await conn.execute(
                 """INSERT INTO documents (source, path, title, hash, privacy_tag, privacy_why, content, doc_date,
-                                          indexed_at, n_chunks)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)
+                                          indexed_at, n_chunks, tags, aliases)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,now(),%s,%s,%s)
                    ON CONFLICT (source, path) DO UPDATE SET title=EXCLUDED.title, hash=EXCLUDED.hash,
                      privacy_tag=EXCLUDED.privacy_tag, privacy_why=EXCLUDED.privacy_why, content=EXCLUDED.content,
-                     doc_date=EXCLUDED.doc_date, indexed_at=now(), n_chunks=EXCLUDED.n_chunks
+                     doc_date=EXCLUDED.doc_date, indexed_at=now(), n_chunks=EXCLUDED.n_chunks, tags=EXCLUDED.tags,
+                     aliases=EXCLUDED.aliases
                    RETURNING id""",
-                (source, path, title, h, privacy, why, raw if store_content else None, date, len(chunks)))
+                (source, path, title, h, privacy, why, raw if store_content else None, date, len(chunks),
+                 tags or None, aliases or None))
             doc_id = (await cur.fetchone())["id"]
             await conn.execute("DELETE FROM chunks WHERE doc_id=%s", (doc_id,))
             for i, c in enumerate(chunks):
@@ -161,7 +193,7 @@ async def upsert_document(*, source: str, path: str, raw: str, rules: dict[str, 
                                            privacy_tag, hash)
                        VALUES (%s,%s,%s,%s,%s::vector,to_tsvector('simple', %s),%s,%s,%s,%s,%s)""",
                     (doc_id, i, c.heading, c.text, old.get(ckey[c.hash]) or new[ckey[c.hash]],
-                     " ".join(chunking.kw_tokens(f"{title}\n{c.heading}\n{c.text}")),
+                     " ".join(chunking.kw_tokens(f"{title}\n{kw_extra}\n{c.heading}\n{c.text}")),
                      source, path, date, privacy, ckey[c.hash]))
     return {"path": path, "status": "updated" if row else "added", "id": doc_id, "chunks": len(chunks),
             "embedded": len(todo), "privacy": privacy}
@@ -177,6 +209,21 @@ async def delete_documents(source: str, keep_paths: set[str] | None = None, *, d
         return cur.rowcount
 
 
+async def delete_paths(source: str, paths: set[str]) -> int:
+    if not paths:
+        return 0
+    async with db.get_pool().connection() as conn:
+        cur = await conn.execute("DELETE FROM documents WHERE source=%s AND path = ANY(%s)", (source, list(paths)))
+        return cur.rowcount
+
+
+async def doc_privacy_tag(source: str, path: str) -> str | None:
+    async with db.get_pool().connection() as conn:
+        cur = await conn.execute("SELECT privacy_tag FROM documents WHERE source=%s AND path=%s", (source, path))
+        row = await cur.fetchone()
+        return row["privacy_tag"] if row else None
+
+
 async def list_documents(limit: int = 500) -> list[dict[str, Any]]:
     async with db.get_pool().connection() as conn:
         cur = await conn.execute(
@@ -186,6 +233,36 @@ async def list_documents(limit: int = 500) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------- retrieval
+_LINKED_SQL = """
+WITH seed AS (
+    SELECT DISTINCT d.path, vault_path_key(d.path) AS pk, vault_name_key(d.path) AS nk
+    FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ANY(%(seeds)s) AND d.source = 'vault'),
+linked AS (
+    SELECT d.id AS doc_id, s.path AS via FROM seed s JOIN note_links l ON l.src = s.path
+      JOIN documents d ON d.source = 'vault' AND d.path <> s.path
+       AND (vault_path_key(d.path) = l.dst OR right(vault_path_key(d.path), length(l.dst) + 1) = '/' || l.dst
+            OR (strpos(l.dst, '/') = 0 AND vault_name_key(d.path) = l.dst))
+    UNION
+    SELECT d.id, s.path FROM seed s
+      JOIN note_links l ON l.dst = s.pk OR l.dst = s.nk OR right(s.pk, length(l.dst) + 1) = '/' || l.dst
+      JOIN documents d ON d.source = 'vault' AND d.path = l.src AND d.path <> s.path)
+SELECT c.id, 1 - (c.embedding <=> %(qv)s::vector) AS sim, k.via
+FROM chunks c JOIN (SELECT doc_id, min(via) AS via FROM linked GROUP BY doc_id) k ON k.doc_id = c.doc_id
+WHERE {where} AND NOT (c.id = ANY(%(top)s))
+ORDER BY c.embedding <=> %(qv)s::vector LIMIT %(m)s
+"""
+
+
+async def _linked_chunks(conn: Any, seeds: list[int], top: list[int], where: str, args: dict[str, Any],
+                         m: int) -> list[dict]:
+    """§10a: chunks of vault notes one link away (either direction) from the best candidates, closest to the query
+    first. They join the rerank pool, so a linked note only surfaces when the reranker rates it."""
+    if m <= 0 or not seeds:
+        return []
+    cur = await conn.execute(_LINKED_SQL.format(where=where), {**args, "seeds": seeds, "top": top, "m": m})
+    return await cur.fetchall()
+
+
 def rrf(rankings: list[list[int]], k: int = 60) -> dict[int, float]:
     """Reciprocal rank fusion: Σ 1/(k + rank) over the lists an id appears in (rank from 1)."""
     out: dict[int, float] = {}
@@ -200,16 +277,18 @@ def select_hits(cands: list[dict[str, Any]], scores: list[float] | None, *, k: i
     """Order and cut the fused candidates: by rerank score when available, else by RRF with a vector floor.
     With the reranker a hit is kept if it clears either floor: the cross-encoder gives some relevant chunks
     (paraphrased, cross-language) scores near 0 that the embedding still rates well, while off-topic queries fail both.
+    A query that is exactly a note's title or alias (§10a) keeps that note's chunks whatever their scores.
     At most one chunk per (path, heading), so overlapping chunks of one section do not crowd out others."""
     if scores is not None:
         for c, s in zip(cands, scores):
             c["score"] = round(s, 4)
-        ranked = sorted((c for c in cands if c["score"] >= min_rerank or (c.get("vec_sim") or 0) >= min_vec),
+        ranked = sorted((c for c in cands if c["score"] >= min_rerank or (c.get("vec_sim") or 0) >= min_vec
+                         or c.get("named")),
                         key=lambda c: -c["score"])
     else:
         for c in cands:
             c["score"] = None
-        ranked = [c for c in cands if (c.get("vec_sim") or 0) >= min_vec]
+        ranked = [c for c in cands if (c.get("vec_sim") or 0) >= min_vec or c.get("named")]
     seen: set[tuple[str, str]] = set()
     out = []
     for c in ranked:
@@ -251,12 +330,21 @@ async def search(query: str, *, private: bool, k: int | None = None, use_rerank:
         top = sorted(fused, key=lambda i: -fused[i])[: int(cfg.get("rerank_candidates", 20))]
         if not top:
             return []
+        linked = await _linked_chunks(conn, top[: int(cfg.get("link_seeds", 3))], top, where, args,
+                                      int(cfg.get("link_candidates", 0)))
+        top += [r["id"] for r in linked if r["id"] not in fused]
         cur = await conn.execute(
-            """SELECT c.id, c.path, c.heading, c.text, c.date, c.privacy_tag, c.source, d.title
+            """SELECT c.id, c.path, c.heading, c.text, c.date, c.privacy_tag, c.source, d.title, d.aliases
                FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ANY(%s)""", (top,))
         rows = {r["id"]: r for r in await cur.fetchall()}
     sims = {r["id"]: float(r["sim"]) for r in vec_rows}
-    cands = [{**rows[i], "rrf": round(fused[i], 5), "vec_sim": round(sims.get(i, 0.0), 4)} for i in top if i in rows]
+    via = {r["id"]: r["via"] for r in linked}
+    sims.update({r["id"]: float(r["sim"]) for r in linked if r["id"] not in sims})
+    norm = lambda t: " ".join((t or "").lower().split())
+    named = {i for i, r in rows.items() if norm(query) in {norm(r["title"]), *map(norm, r.pop("aliases") or [])}}
+    cands = [{**rows[i], "rrf": round(fused.get(i, 0.0), 5), "vec_sim": round(sims.get(i, 0.0), 4),
+              **({"via_link": via[i]} if i in via and i not in fused else {}),
+              **({"named": True} if i in named else {})} for i in top if i in rows]
     scores = await rerank(query, [f"{c['title']} › {c['heading']}\n{c['text']}"[:3000] for c in cands]) \
         if use_rerank and cfg.get("rerank", True) else None
     hits = select_hits(cands, scores, k=k, min_rerank=float(cfg.get("min_rerank_score", 0.2)),
@@ -269,8 +357,13 @@ async def search(query: str, *, private: bool, k: int | None = None, use_rerank:
 
 
 def cite_label(hit: dict[str, Any]) -> str:
-    """`path#heading` (Obsidian-style anchor) for citations."""
-    return hit["path"] + (f"#{hit['heading'].split(' › ')[-1]}" if hit.get("heading") else "")
+    """`path#heading` (Obsidian-style anchor) for citations; vault notes as an Obsidian link `[[Note#Heading]]`."""
+    head = hit["heading"].split(" › ")[-1] if hit.get("heading") else ""
+    if hit.get("source") == "vault":
+        if head.startswith("📎 "):   # text of an embedded attachment: link the file itself
+            return f"[[{head[2:].strip()}]]"
+        return "[[" + re.sub(r"\.(md|markdown)$", "", hit["path"], flags=re.I) + (f"#{head}" if head else "") + "]]"
+    return hit["path"] + (f"#{head}" if head else "")
 
 
 def to_json(hits: list[dict[str, Any]]) -> str:

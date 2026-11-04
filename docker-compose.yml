@@ -5,7 +5,8 @@ name: agent-harness
 # + phase 10 RAG + memory: reranker (CPU cross-encoder), docs folder mounted read-only at /docs (§10).
 # + phase 6 Copilot ingest + harness-memory MCP: host Copilot session-state mounted read-only at /copilot-sessions (§9b/§9c).
 # + phase 9 media-worker (§5): uploads in /srv/agent/files, extraction on queue arq:media.
-# Later phases add syncthing.
+# + phase 10a Obsidian vault (§10a): VAULT_DIR read-only at /vault, only its Inbox/ and AI/ read-write (/vault-rw),
+#   whole vault read-write only in agent-api (/vault-edit, owner-approved edits); vault-indexer watcher; syncthing.
 
 x-proxy-env: &proxy-env
   HTTP_PROXY: http://egress-proxy:4750
@@ -53,6 +54,9 @@ x-app: &app
     - ${COPILOT_SESSIONS_DIR:-/home/hoder/.copilot/session-state}:/copilot-sessions:ro   # phase 6 ingest (§9b)
     - ${GOOGLE_DIR:-/home/hoder/.config/harness/google}:/google:ro   # phase 7b Calendar grant (host/google_auth.py)
     - ${FILES_DIR:-/srv/agent/files}:/files                  # phase 9 uploads (§5), sha256-named
+    - ${VAULT_DIR:-/home/hoder/vault}:/vault:ro               # phase 10a vault (§10a)
+    - ${VAULT_DIR:-/home/hoder/vault}/Inbox:/vault-rw/Inbox   # the only vault folders the agent writes
+    - ${VAULT_DIR:-/home/hoder/vault}/AI:/vault-rw/AI
   restart: unless-stopped
   networks: [agent]
   depends_on:
@@ -63,6 +67,16 @@ services:
   agent-api:
     <<: *app
     ports: ["127.0.0.1:8100:8000"]          # host-only (hooks, MCP, host scripts)
+    volumes:                                 # x-app's list + the whole vault read-write (approved edits only)
+      - ./config:/config:ro
+      - ${DOCS_DIR:-/home/hoder/agent-docs}:/docs:ro
+      - ${COPILOT_SESSIONS_DIR:-/home/hoder/.copilot/session-state}:/copilot-sessions:ro
+      - ${GOOGLE_DIR:-/home/hoder/.config/harness/google}:/google:ro
+      - ${FILES_DIR:-/srv/agent/files}:/files
+      - ${VAULT_DIR:-/home/hoder/vault}:/vault:ro
+      - ${VAULT_DIR:-/home/hoder/vault}/Inbox:/vault-rw/Inbox
+      - ${VAULT_DIR:-/home/hoder/vault}/AI:/vault-rw/AI
+      - ${VAULT_DIR:-/home/hoder/vault}:/vault-edit          # vault_writer.apply_approved, vault_tool notion-fix
     networks: [agent, edge]                  # edge = nodeReact nginx network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
@@ -100,6 +114,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  vault-indexer:                             # phase 10a (§10a): re-index vault edits within seconds (inotify)
+    <<: *app
+    command: ["python", "-m", "app.rag.watcher"]
+    volumes:
+      - ./config:/config:ro
+      - ${FILES_DIR:-/srv/agent/files}:/files                  # embedded attachments → media-worker
+      - ${VAULT_DIR:-/home/hoder/vault}:/vault:ro
+    healthcheck:                             # heartbeat written every 30 s
+      test: ["CMD", "python", "-c", "import asyncio,app.state as s; assert asyncio.run(s.get_redis().exists('vault_indexer:heartbeat'))"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  syncthing:                                 # phase 10a (§10a): phone ⇄ PC vault sync; GUI host-only :8384
+    image: syncthing/syncthing:2
+    hostname: agent-harness-vault
+    environment: { PUID: "1000", PGID: "1000", STGUIADDRESS: "0.0.0.0:8384", TZ: Asia/Taipei }
+    volumes:
+      - syncthing:/var/syncthing             # home, config in ./config (the entrypoint chowns it to PUID)
+      - ${VAULT_DIR:-/home/hoder/vault}:/var/syncthing/vault
+    ports:
+      - "127.0.0.1:8384:8384"                # web GUI (SSH tunnel)
+      - "22000:22000/tcp"                    # sync protocol (TLS, device-ID auth)
+      - "22000:22000/udp"
+      - "21027:21027/udp"                    # LAN discovery
+    networks: [egress]                       # discovery/relays need the internet; no access to the agent network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fkLs http://127.0.0.1:8384/rest/noauth/health | grep -q OK"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
 
   gpu-governor:                              # phase 4 (§11): NVML + steam-headless → gpu_state in Redis
     image: agent-harness-api:latest          # built by the services above (same code, no secrets needed)
@@ -355,7 +403,7 @@ services:
     restart: unless-stopped
     networks: [dockerctl]
 
-volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {}, hf: {}, media-models: {} }
+volumes: { ollama: {}, pg: {}, redis: {}, phoenix: {}, hf: {}, media-models: {}, syncthing: {} }
 
 networks:
   agent: { internal: true }

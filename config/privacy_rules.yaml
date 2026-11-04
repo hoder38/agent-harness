@@ -23,3 +23,7 @@ private_keywords:     # calendar questions must stay on local models (the calend
 # Docs-folder subfolders (any level) whose documents are PRIVATE (RAG §10). Frontmatter `privacy: private` also works.
 private_doc_dirs:
   - private
+
+# Vault/docs path prefixes (from the root) whose notes are PRIVATE (§10a), e.g. "Areas/Health", "Journal".
+# The daily notes (AI/Daily) are always written with `privacy: private`.
+private_paths: []

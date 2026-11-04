@@ -3,6 +3,8 @@
 # agent-harness/README.md, copied there as the starter corpus. Add cases for your own notes as the folder grows.
 # expect: "path" (any chunk of the document) or "path#Heading" (the chunk's heading path must contain Heading).
 # A case is a hit when any expected target is in the top k.
+# source: chunk source searched (default docs, so §10a vault notes do not shift the baseline); vault, or any = all.
+# Vault targets use the vault-relative path, e.g. "Notes/Recipes/Bread.md#Method".
 cases:
   - q: How much VRAM does the GPU have and what is the CPU/RAM of the machine?
     expect: agent-harness/ARCHITECTURE.md#Machine & environment constraints

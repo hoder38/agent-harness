@@ -1,0 +1,8 @@
+[Unit]
+Description=agent-harness nightly git commit of the Obsidian vault
+
+[Service]
+Type=oneshot
+User=hoder
+Environment=VAULT_DIR=/home/hoder/vault
+ExecStart=/home/hoder/agent-harness/host/vault-commit.sh

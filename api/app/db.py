@@ -104,7 +104,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS inbox_open_run ON inbox (run_id)
 CREATE TABLE IF NOT EXISTS schedules (
     id              BIGSERIAL PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
-    kind            TEXT NOT NULL,                       -- brief | eval | prompt
+    kind            TEXT NOT NULL,                       -- brief | eval | prompt | vault_daily
     cron            TEXT NOT NULL,                       -- "m h dom mon dow", Asia/Taipei
     text            TEXT NOT NULL DEFAULT '',            -- prompt for kind=prompt
     enabled         BOOLEAN NOT NULL DEFAULT true,

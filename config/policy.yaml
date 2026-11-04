@@ -27,6 +27,7 @@ schedules:
   builtin:
     morning_brief: {kind: brief, cron: "0 7 * * *"}
     nightly_eval: {kind: eval, cron: "30 2 * * *"}
+    vault_daily: {kind: vault_daily, cron: "50 23 * * *"}   # §10a AI/Daily/<date>.md summary (no model call)
 
 # Phase 11 events: POST /events/<source> with `X-Hub-Signature-256: sha256=<hmac>` (secret in EVENT_SECRETS JSON).
 # An event only becomes an Inbox item (+ optional LINE line); it never starts an agent run.
@@ -247,6 +248,19 @@ rag:                         # phase 10 (§10): app/rag/, docs folder DOCS_DIR -
   top_k: 5
   skip_clarify_score: 0.5   # a KB hit this sure → no clarifying question (cite_only); weaker hits are hinted
   skip_task_types: [chitchat]  # grounded graph does not search the KB for these
+  link_seeds: 3              # §10a: the best fused candidates whose vault notes are expanded one link away
+  link_candidates: 3         # chunks of linked notes (closest to the query) added to the rerank pool; 0 = off
+
+vault:                       # phase 10a (§10a): Obsidian vault VAULT_DIR -> /vault (ro), Inbox/ + AI/ rw, Syncthing
+  enabled: true
+  debounce_ms: 2000          # vault-indexer: quiet time after a change before re-indexing (Syncthing writes in bursts)
+  index_lock_s: 1800
+  attachments: true          # embedded PDF/images/Office files: extracted by the media-worker (always PRIVATE → local)
+  attachment_kinds: [doc, image]
+  attachment_max_mb: 50
+  attachment_max_chars: 100000
+  daily_folder: AI/Daily     # nightly summary + `## Log` (append_daily_note); always privacy: private
+  notify_line: true          # LINE push when a note edit waits for approval (no note content)
 
 memory:                      # phase 10 (§10): app/memory.py, LangGraph PostgresStore
   enabled: true

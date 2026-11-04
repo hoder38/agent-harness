@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     reranker_url: str = ""                             # §10 CPU cross-encoder; empty = RRF order only
     google_credentials_path: str = "/google/calendar.json"   # host-only OAuth grant (host/google_auth.py), mounted ro
     docs_root: str = "/docs"                           # §10 read-only docs folder indexed for RAG
+    vault_root: str = "/vault"                         # §10a Obsidian vault, read-only (indexing, read_note)
+    vault_rw_root: str = "/vault-rw"                   # only <vault>/Inbox and <vault>/AI, read-write (agent writes)
+    vault_edit_root: str = "/vault-edit"               # whole vault read-write: agent-api only (approved edits)
     files_root: str = "/files"                         # §5 uploads: /srv/agent/files/<sha[:2]>/<sha> on the host
     copilot_sessions_dir: str = "/copilot-sessions"    # §9b host ~/.copilot/session-state, read-only
     compose_project: str = "agent-harness"

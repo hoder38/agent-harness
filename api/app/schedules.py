@@ -1,7 +1,8 @@
 """Schedules (phase 11, §4 Cron): rows in the `schedules` table, checked every minute by the scheduler.
 
 kind `brief` = morning brief (app/brief.py), `eval` = nightly answer + retrieval eval (app/tools/answer_eval.py),
-`prompt` = run `text` as a background turn in the web thread `web:sched-<name>`. Built-in rows come from
+`prompt` = run `text` as a background turn in the web thread `web:sched-<name>`, `vault_daily` = the day's summary in
+the Obsidian vault's AI/Daily note (app/vault_daily.py, §10a). Built-in rows come from
 policy.yaml `schedules.builtin` and are only inserted when missing, so edits made through the API stay.
 A schedule whose minute passes while the scheduler is down is skipped, not caught up.
 """
@@ -16,7 +17,7 @@ from .todos import TZ
 
 log = logging.getLogger(__name__)
 
-KINDS = ("brief", "eval", "prompt")
+KINDS = ("brief", "eval", "prompt", "vault_daily")
 _RANGES = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
 _COLS = "id, name, kind, cron, text, enabled, builtin, last_run_at, last_status, created_at"
 
@@ -123,6 +124,11 @@ async def run_one(redis, s: dict[str, Any], minute: datetime) -> str:
     if s["kind"] == "eval":
         await redis.enqueue_job("answer_eval_job", {}, _job_id=f"eval:{minute:%Y%m%d%H%M}", _queue_name=bg)
         return "queued"
+    if s["kind"] == "vault_daily":
+        if not (pol.get("vault") or {}).get("enabled"):
+            return "skipped (vault off)"
+        from . import vault_daily
+        return f"ok {await vault_daily.run()}"
     if s["kind"] == "prompt":
         from . import pipeline
         from .settings import get_settings

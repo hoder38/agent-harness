@@ -52,6 +52,12 @@ async def kb_search(query: str, *, private: bool) -> list[dict]:
         return []
 
 
+def cite_label(hit: dict) -> str:
+    from ..rag import store
+
+    return store.cite_label(hit)
+
+
 async def recall_memories(query: str, *, private: bool) -> list[dict]:
     from .. import memory
 
@@ -1138,7 +1144,7 @@ def build_grounded_graph(
         kb_sources: dict[str, dict] = {}
         for h in await kb_lookup(s):
             sid = f"s{len(kb_sources) + 1}"
-            label = h.get("cite") or (h["path"] + (f"#{h['heading'].split(' › ')[-1]}" if h.get("heading") else ""))
+            label = h.get("cite") or cite_label(h)
             date = h.get("date")
             kb_sources[sid] = {
                 "id": sid, "url": f"kb:{label}", "final_url": f"kb:{label}", "domain": "kb", "kb_path": label,

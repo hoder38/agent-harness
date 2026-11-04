@@ -42,6 +42,13 @@ def tools_for(route: str, *, private: bool = False, local: bool = False) -> list
         from .todos import TODO_TOOLS
 
         tools += TODO_TOOLS
+    from .. import config
+
+    vault_on = bool((config.policy().get("vault") or {}).get("enabled"))
+    if route in TODO_ROUTES and vault_on:
+        from .vault import write_tools
+
+        tools += write_tools(private=private)
     if route in KB_ROUTES:  # local services only: PRIVATE threads get them too
         from .. import config
         from .knowledge import kb_tools
@@ -53,6 +60,10 @@ def tools_for(route: str, *, private: bool = False, local: bool = False) -> list
         if not (pol.get("memory") or {}).get("enabled"):
             kt = [t for t in kt if t.name == "search_knowledge"]
         tools += kt
+        if vault_on:
+            from .vault import read_tools
+
+            tools += read_tools(private=private)
     # Web tools send text off the machine, so PRIVATE threads never get them.
     if route in WEB_ROUTES and not private:
         from .web import fetch_page, web_search
@@ -94,8 +105,9 @@ def narrow_for_intent(tools: list, text: str) -> list:
     return tools
 
 
-WRITE_TOOLS = {"add_todo", "complete_todo", "add_event", "delete_event", "remember"}
-_REMEMBER = re.compile(r"記住|記下|remember", re.I)
+WRITE_TOOLS = {"add_todo", "complete_todo", "add_event", "delete_event", "remember", "capture_note",
+               "append_daily_note", "edit_note"}
+_REMEMBER = re.compile(r"記住|記下|remember|筆記|日記|存成|存到|note|obsidian|vault", re.I)
 
 
 def for_attachments(tools: list, owner_text: str) -> list:

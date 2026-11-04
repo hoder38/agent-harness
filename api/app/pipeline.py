@@ -36,6 +36,7 @@ Clarifying questions:
 
 Memory:
 /remember <fact> - save a fact or preference about you (review and edit them on the Memory page)
+/note <text> - save a note to the Obsidian vault Inbox/ folder
 
 Owner controls:
 /stop cloud - block all cloud model calls
@@ -97,6 +98,32 @@ async def _remember(job: Job, fact: str) -> str:
     return "🧠 Remembered" + (" (private)" if private else "") + f": {fact}"
 
 
+_NOTE_CMD = re.compile(r"^\s*/note(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+
+
+async def _note(job: Job, text: str) -> str:
+    """/note <text>: a new note in the vault's Inbox/ (private when the thread or the text is)."""
+    from . import vault_writer
+
+    if not (config.policy().get("vault") or {}).get("enabled"):
+        return "The vault is turned off (policy vault.enabled)."
+    if not text:
+        return "Usage: /note <text>, e.g. /note 買新的濾水器濾心"
+    r = state.get_redis()
+    g0 = gate0(Job(**{**job.model_dump(), "text": text}), config.privacy_rules(),
+               thread_private=await state.is_thread_private(r, job.thread_id), channel=job.channel)
+    private = g0.privacy_tag == "PRIVATE" or bool(g0.findings)
+    try:
+        rel = vault_writer.capture(text, source=job.channel, private=private)
+    except vault_writer.VaultWriteError as e:
+        return f"Not saved: {e}"
+    except OSError as e:
+        log.exception("/note failed")
+        return f"Not saved: vault not writable ({type(e).__name__})"
+    await db.audit("vault", "capture", {"path": rel, "private": private, "channel": job.channel})
+    return "📝 Saved" + (" (private)" if private else "") + f": {rel}"
+
+
 def _with_clarification(request: str, question: str | None, answer: str) -> str:
     """Routing text for an answer to a clarifying question: the router judges the whole exchange."""
     parts = [request]
@@ -131,6 +158,8 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
         return SubmitResult(command_reply="Nothing to skip: no question is waiting for an answer.")
     if not skip and (fact := memory.parse_remember(own)) is not None:
         return SubmitResult(command_reply=await _remember(job, fact))
+    if not skip and (m := _NOTE_CMD.match(own)):
+        return SubmitResult(command_reply=await _note(job, (m.group(1) or "").strip()))
     if not skip and (reply := await handle_command(own, source=job.channel)):
         return SubmitResult(command_reply=reply)
 

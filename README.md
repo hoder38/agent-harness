@@ -31,6 +31,10 @@ agent-scheduler: cron alert watcher (containers, queue age, budget) → LINE pus
    sudo cp host/systemd/agent-backup.* /etc/systemd/system/ && sudo systemctl enable --now agent-backup.timer
    sudo cp host/systemd/agent-restore-test.* /etc/systemd/system/ && sudo systemctl enable --now agent-restore-test.timer
    ```
+5. Obsidian vault (§10a). Run `host/vault-init.sh` **before** the first `compose up`; the Inbox/ and AI/ bind mounts must exist. Then install the nightly vault commit:
+   ```
+   sudo cp host/systemd/agent-vault-commit.* /etc/systemd/system/ && sudo systemctl enable --now agent-vault-commit.timer
+   ```
 
 ## Usage
 
@@ -119,6 +123,33 @@ docker compose exec -T agent-worker-bg python -m app.tools.rag_eval --both -v  #
 ```
 
 The eval cases in `config/rag_eval.yaml` expect `agent-harness/ARCHITECTURE.md` and `README.md` under the docs folder. Copy them with `mkdir -p ~/agent-docs/agent-harness && cp ARCHITECTURE.md README.md ~/agent-docs/agent-harness/`.
+
+## Obsidian vault (phase 10a, ARCHITECTURE.md §10a)
+
+- **Location:** `VAULT_DIR` (default `/home/hoder/vault`), a git repo with folders `Inbox/ Notes/ Notion/ Projects/ Areas/ Resources/ Archive/ AI/ Attachments/`.
+- **Indexing:** the `vault-indexer` service re-indexes a changed note in under a second. It reads tags, aliases, `privacy:` frontmatter and links; embedded PDFs and images are extracted by the media-worker. Answers cite notes as `[[Note#Heading]]`.
+- **Agent writes:** the agent writes only to `Inbox/` (`capture_note`, `/note <text>`) and `AI/` (`append_daily_note`, the nightly `AI/Daily/` summary at 23:50). An `edit_note` anywhere else becomes an Inbox item with a diff; approve applies it, but only if the note has not changed since.
+- **Copilot:** the `harness-memory` MCP server offers `search_notes` and `read_note` (non-private notes only).
+- **History:** one git commit per night (00:15, `agent-vault-commit.timer`).
+
+**Phone sync (Syncthing):** open the GUI through an SSH tunnel (`ssh -L 8384:127.0.0.1:8384 <host>`, then http://localhost:8384) and set a GUI password. Then:
+1. Add the phone as a device.
+2. Share folder id `vault` with it.
+3. On the phone, open the synced folder as an Obsidian vault.
+
+To show this machine's device ID:
+```bash
+docker compose exec syncthing syncthing cli --gui-address=127.0.0.1:8384 \
+  --gui-apikey="$(docker compose exec -T syncthing sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p' /var/syncthing/config/config.xml | tr -d '\r')" show system | grep myID
+```
+
+**Notion import:** in Obsidian desktop, open the Importer plugin, choose Notion, and import into `Notion/`. Use either the API (an `ntn_…` integration token; databases become `.base` files) or an HTML export zip (Include everything, Create folders for subpages). Then:
+```bash
+docker compose exec -T agent-api python -m app.tools.vault_tool notion-fix --dry-run   # then without --dry-run; --strip-ids drops Notion ids from file names
+docker compose exec -T agent-api python -m app.tools.vault_tool links --folder Notion  # broken-link report, exit 1 if any
+docker compose exec -T agent-api python -m app.tools.vault_tool index                 # full rescan now
+docker compose exec -T agent-api python -m app.tools.vault_tool daily yesterday       # rebuild a daily note
+```
 
 ## Copilot SSH sessions ↔ memory (phase 6, ARCHITECTURE.md §9b/§9c)
 

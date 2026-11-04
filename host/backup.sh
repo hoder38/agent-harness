@@ -25,11 +25,11 @@ mkdir -p "$DEST"/{pg,config,vault,volumes}
 docker compose exec -T agent-postgres pg_dump -U agent -Fc agent > "$DEST/pg/agent.dump.tmp"
 mv "$DEST/pg/agent.dump.tmp" "$DEST/pg/agent.dump"
 
-# 2. Files: config (no .env), vault (+ .git) if present, Redis AOF + Phoenix volumes
+# 2. Files: config (no .env), vault (+ .git) if present, Redis AOF + Phoenix + Syncthing volumes
 rsync -a --delete --exclude '.env*' ./config/ "$DEST/config/"
 [[ -d /home/hoder/vault ]] && rsync -a --delete /home/hoder/vault/ "$DEST/vault/"
 [[ -d /srv/agent/files ]] && mkdir -p "$DEST/files" && rsync -a --delete /srv/agent/files/ "$DEST/files/"
-for v in redis phoenix; do
+for v in redis phoenix syncthing; do   # syncthing: device keys + folder config (§10a)
   docker run --rm -v "agent-harness_${v}:/src:ro" -v "$DEST/volumes:/dst" busybox \
     tar -C /src -cf "/dst/${v}.tar" .
 done

@@ -9,8 +9,8 @@ from ..rag import store
 def kb_tools(*, private: bool) -> list:
     @tool
     async def search_knowledge(query: str) -> str:
-        """Search the owner's own notes and documents. Returns passages with a `cite` label (path#heading);
-        cite them as 📄 path#heading when you use them."""
+        """Search the owner's own notes and documents (including the Obsidian vault). Returns passages with a
+        `cite` label (path#heading, or [[Note#Heading]] for vault notes); cite them as 📄 <cite> when you use them."""
         hits = await store.search(query, private=private)
         return store.to_json(hits) if hits else "No matching passages in the owner's documents."
 
