@@ -82,6 +82,7 @@ grounding:
   # search_skip_task_types and turns the owner's documents already answer (rag.skip_clarify_score). 2026-11-03.
   always_search: true
   search_skip_task_types: [chitchat]
+  search_history_turns: 3           # cite_only plan_search sees this many earlier turns (follow-ups like "那價格呢?")
   cite_pages: 2                     # pages read per turn (also capped by tool_limits.fetch_page)
   cite_chars: 4000                  # excerpt chars per page given to the model
   per_turn: { max_usd: 0.05, max_active_s: 90 }
@@ -147,7 +148,7 @@ router:
 
 executor:
   recursion_limit: 90            # 10 clarify rounds x3 + 3 research loops x5 + fixed nodes ~= 55
-  assistant_history_turns: 8     # assistant route: shorter history, earlier tool calls hidden (Qwen copies them)
+  assistant_history_turns: 20    # assistant route: earlier tool calls are hidden (Qwen copies them); was 8 until 2026-11-06
   max_history_turns: 20          # keep last N user turns in the model context
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry

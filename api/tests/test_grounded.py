@@ -517,6 +517,18 @@ async def test_local_thinking_that_leaves_no_answer_is_retried_without_thinking(
     assert llm.calls.count("compose") == 2 and out["answer"]["text"].endswith("Sunny today.")
 
 
+async def test_cite_only_plan_search_sees_recent_turns_for_follow_ups(cite):
+    msgs = []
+    for i, topic in enumerate(["Pixel 9", "Galaxy S25", "Xperia 1", "iPhone 17"]):
+        msgs += [HumanMessage(f"tell me about the {topic}", id=f"h{i}"), AIMessage(f"The {topic} is a phone.", id=f"a{i}")]
+    msgs.append(HumanMessage("那價格呢?", id="m1"))
+    g, llm, _ = cite({"plan_search": PLAN, "compose": "About $799."})
+    await run(g, {**inp("那價格呢?"), "messages": msgs})
+    seen = "\n".join(m.content for m in next(m for t, m in llm.seen if t == "plan_search")[1:])
+    assert "iPhone 17" in seen and "Galaxy S25" in seen and "Pixel 9" not in seen  # 3 earlier turns only
+    assert seen.endswith("那價格呢?")
+
+
 async def test_cite_only_bad_citations_recompose_then_strip(cite):
     web = Web(hits={"pricing": ["https://openai.com/api/pricing"]}, pages={"https://openai.com/api/pricing": "x"})
     g, llm, _ = cite({"plan_search": PLAN, "compose": "See https://evil.example/p [3] and [1]."}, web)

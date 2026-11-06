@@ -298,6 +298,7 @@ def build_grounded_graph(
     max_clarify = int((policy.get("clarify") or {}).get("max_rounds", 5))
     always_search_cfg = bool(g_cfg.get("always_search"))
     search_skip = set(g_cfg.get("search_skip_task_types") or ["chitchat"])
+    search_history = int(g_cfg.get("search_history_turns", 3))
     max_claims = int(g_cfg.get("max_claims", 8))
     brave_usd = float(g_cfg.get("brave_usd_per_query", 0.0))
     judge_ttl = int(float(g_cfg.get("llm_authority_cache_days", 30)) * 86400)
@@ -1182,10 +1183,14 @@ def build_grounded_graph(
             "local news) assume Taiwan unless another place is named, and write Chinese queries in Traditional "
             "Chinese with Taiwanese terms.\n"
             "Reply with JSON only: {\"needs_web\": true|false, \"entity\": \"subject or null\", "
-            "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}" + kb_note)
+            "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}" + kb_note
+            + ("\nThe earlier conversation is only there to resolve what the latest request refers to (it, that, "
+               "the price, 那個, 它); search for the latest request." if search_history > 0 else ""))
+        # +1: the window includes the current turn, which is dropped below
+        history = plain_history(s["messages"], search_history + 1)[:-1] if search_history > 0 else []
         try:
             raw = await call(s, budget, "plan_search", sysmsg,
-                             [HumanMessage(f"Latest request (with clarifications so far):\n{s['question']}")], 300)
+                             [*history, HumanMessage(f"Latest request (with clarifications so far):\n{s['question']}")], 300)
         except Exhausted as e:
             budget["exhausted"] = e.why
             return {"budget": budget, **base}
