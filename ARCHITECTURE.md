@@ -264,6 +264,25 @@ Keep the interface (`gate1(text) -> is_private`) as a no-op stub returning `None
 - Only when Gate 0 is inconclusive on free-form text. Output: `is_private: bool`.
 - When `gpu_state=GAMING`: skip and treat inconclusive as PRIVATE for background jobs.
 
+### Privacy model revised — secrets + owner choice only (decided 2026-11-05, planned, not built)
+Measured over 14 days: 20 of 367 requests were PRIVATE, 17 of them only because the thread had once contained
+PRIVATE content, the rest from keywords (`行程` also matched travel itineraries). Local models are much weaker than
+cloud, so PRIVATE should be rare and deliberate. New rules:
+- **Secrets/PII are always redacted** before any cloud call (Gate 0 regex, unchanged). A `private: true` pattern
+  (secrets such as keys, private keys, tokens) still forces local for that message only.
+- **PRIVATE only by owner decision:** `/local`, a thread the owner marks private (toggle in nodeReact chat, stored
+  in `thread_private:*`), a vault note with frontmatter `privacy: private`, files under `~/private` / `private/`
+  doc dirs, and explicit `private_paths`. These stay local-only as today (`decision.py` rule 2).
+- **Removed:** `private_keywords` (calendar terms), content-based thread stickiness (a thread no longer becomes
+  PRIVATE because one message was; `pipeline.py` stops calling `mark_thread_private` on Gate 0 hits),
+  `private_sources` for calendar/personal notes.
+- **Opened to cloud:** calendar tools (`tools/__init__.py` offers them on cloud routes too; event approvals stay in
+  the Inbox), `AI/Daily/` notes (no longer forced `privacy: private`; still private if the day includes a PRIVATE
+  thread), episodes of non-private threads.
+- Unchanged: LINE never receives PRIVATE content; morning brief LINE text stays content-free; existing PRIVATE
+  threads/notes keep their tag (no automatic downgrade).
+- Gate 1 is not needed for this model; it stays deferred.
+
 ### Gate 2 — Jev router
 Single `system_one` call on **redacted** text/summary only. Never send PRIVATE content.
 If PRIVATE, use a Qwen-based fallback router with the same output schema.
@@ -466,6 +485,17 @@ question with diff (21 s) → "1" → commit on a local `agent/…` branch, sand
 The PAT must be user-owned with the account permission "Copilot Requests"; otherwise Copilot fails with
 "Authentication failed" even though `/user` works.
 
+### Planned: review before approval (decided 2026-11-05, not built)
+- After the harness tests pass and before the approval interrupt, run one more Copilot job in the same sandbox
+  (`kind: review`, read-only tools, no writes to `/workspace`) that runs the code-review and security-review agents
+  on the diff (non-interactive equivalents of `/review` and `/security-review`; exact invocation to VERIFY).
+- The approval question/Inbox item gets the findings (severity, file:line, one line each) under the diffstat;
+  high-severity findings are shown first. Findings never block — the owner still decides. A review error or timeout
+  adds "review unavailable" and continues.
+- Counts toward the same `--max-ai-credits` budget; skipped for docs-only diffs; `coding.review.enabled` toggle.
+- Acceptance: a diff with a planted bug and a planted secret produces findings in the approval item; a clean diff
+  produces "no issues"; the review job cannot modify the clone.
+
 ### 9b. SSH Copilot → harness memory (ingest)
 Host-level Copilot hooks (`~/.copilot/hooks/harness.json`):
 ```json
@@ -637,6 +667,122 @@ vault/
 
 **Not done / follow-ups**: browser Obsidian container (optional; Obsidian desktop/mobile via Syncthing instead); §12 verify-mode `kb_search`/`kb_read` for PRIVATE threads still return "local KB not available" (cite_only mode already cites the vault); Notion import itself is a manual owner step.
 
+## 10c. Knowledge curation — planned (decided 2026-11-05, not built)
+
+Goal: the vault fills up with useful, well-described notes without the owner writing them from scratch. Notion
+notes were written tersely for the owner's own eyes and retrieve poorly; repeated work lives only in short todos.
+A periodic job drafts notes and edits from what the harness already sees; **nothing lands outside `AI/` without
+owner approval**.
+
+**Where content belongs** (applies to the Notion import and to curation output)
+- **Content vs views:** content has one home; views only reference it. Notes → vault (`Notes/`, `Projects/`,
+  `Resources/`); open todos → `todos` table (nodeReact `/Todos`, reminders, tools, MCP); events → Google Calendar;
+  short facts/preferences → `/remember` memories; secrets → a password manager, never the vault.
+- **Views** (dashboards, Bases, boards, link lists) go in `Views/` and are excluded from RAG — they carry little
+  text and crowd out real notes. Needs a new `vault.exclude_paths` (vault-relative globs) in the indexer.
+- **Worth keeping as notes** ("would I ask the agent this in six months, and only I know the answer?"): decisions
+  and their reasons, problems and fixes, verified procedures (SOPs), project context, learning summaries in the
+  owner's words, personal reference (models, specs, account purposes, contacts), meeting outcomes. Not worth it:
+  copied web articles (keep only the owner's comments + link), stale temporary info, done todos (one archive note).
+- **Repeated work:** each occurrence is a todo; *how to do it* is one SOP note (`Resources/SOP/<name>.md`: steps,
+  checklist, systems/files, pitfalls, typical duration) that grows each time; a one-line preference is a
+  `procedures` memory. Todos have no recurrence field; a schedule can create them (verify that a `prompt` schedule
+  turn can call `add_todo`, else add a schedule kind that creates a todo linking its SOP).
+- **Terse imported notes:** import as-is (`notion-fix`, `links --folder Notion`), measure with `rag_eval` cases
+  pinned to `source: vault`, enrich only notes that miss. Enrichment is additive: better titles, `aliases`/`tags`
+  (indexed as keywords; an exact title/alias match is always kept), `[[links]]` (1-hop expansion), and a short
+  context block at the top of the body. The folder path and other frontmatter fields (e.g. `summary:`) are **not**
+  indexed — embedding text is `title + heading + text` (`rag/store.py`), so context must be in the body.
+  Notes that don't fit "worth keeping" go to `Archive/` instead of being enriched.
+
+**Curation job** (schedule kind `curate`, weekly, background queue)
+1. **Sources** since the last run: done todos (title + notes), episode summaries, `Inbox/` captures, `AI/Daily/`
+   notes, Copilot session episodes, new memories, and existing notes that failed retrieval (eval misses).
+2. **Group:** embed items and cluster; a cluster becomes a candidate when it recurs (e.g. ≥ 3 similar done todos)
+   or matches an existing note.
+3. **Proposal kinds**, ranked by value, **at most `curate.max_proposals` (5) per run**:
+   - **new note** — SOP, decision record, problem/fix note; draft written to `AI/Curation/`;
+   - **update** — new facts appended to an existing note (diff);
+   - **tidy** — add aliases/tags/`[[links]]`, merge duplicates, file `Inbox/` captures into a folder;
+   - **archive** — stale or unused notes → `Archive/`.
+4. **Missing facts are asked, not invented:** a draft lists open questions (e.g. "which system is used in step 3?")
+   in a marked block; the owner's answers in the Inbox item are folded into the final note.
+5. **Approval** through the Inbox (`kind: approval`, `detail.curation`):
+   - update/tidy/archive reuse the `vault_edit` flow (unified diff, `base_sha` check, 409 → re-propose);
+   - new notes need a new action: approve = move the draft from `AI/Curation/` to the owner-chosen folder via
+     `/vault-edit` (the model suggests a default folder); reject = delete the draft;
+   - rejections are recorded (cluster hash + kind) and not proposed again; dismissing every proposal of a run
+     lowers the next run's cap.
+6. Generated text is wrapped in `<!-- harness:curated -->` markers so the owner's own text stays distinguishable.
+
+**Routing & privacy** — curation runs through the normal pipeline (Gate 0 → router → `decide()`), not a side path
+- The job is a normal `Job` (channel `cron`, background queue), so budget, kill switch, GPU state and the decision
+  log apply unchanged.
+- **Gate 0 per source item, batches split by privacy:** one PRIVATE item makes a whole prompt PRIVATE, so items are
+  gated individually and grouped into PRIVATE and non-PRIVATE batches.
+  - PRIVATE batch (owner-marked only, per the revised privacy model in §6: frontmatter `privacy: private`,
+    `private_paths`, private threads' episodes) → local only (hard rule, `decision.py` rule 2).
+  - Non-PRIVATE batch (most material, including `AI/Daily/`) → the router may pick `cloud_fast`/`cloud_strong`;
+    the model only ever sees redacted text.
+- **Reversible pseudonymisation (new):** today `gate0.redact` replaces matches with `[REDACTED:<name>]`, which is
+  one-way. For curation, replace each match with a stable placeholder (`<EMAIL_1>`, `<PHONE_2>`, …), keep the map
+  locally (Redis, per job, TTL), and restore the originals in the cloud draft **locally** before it reaches the
+  Inbox. The map never leaves the harness; a draft with an unknown placeholder is rejected.
+- Names, companies and addresses are not redacted (accepted under the revised privacy model); no Gate 1 needed.
+
+**Read-only note viewer (nodeReact)** — for "just show me the note" without a model call
+- Today the chat answers from the top RAG chunks (a paraphrase, model cost, a few seconds) and citations such as
+  `[[Note#Heading]]` are plain text; `read_note` shows a whole note only when asked explicitly.
+- API: `GET /api/agent/notes/{path}` (owner token, web only) → `{path, title, frontmatter, body, privacy_tag,
+  mtime, links, backlinks}` read from `/vault` (read-only). Path checks like the MCP `read_note` (vault-relative,
+  realpath containment, no hidden files); `Views/` and PRIVATE notes are allowed (owner, own UI). Never exposed on
+  LINE or to unauthenticated routes. Attachments via `GET /api/agent/notes/{path}/attachment?name=` (images
+  inline, others as download; same containment check).
+- nodeReact page `/Notes?path=…#heading`: renders Markdown (wikilinks and embeds resolved like the indexer,
+  `[[x]]` links open the viewer, a missing target shows as unresolved), scrolls to the heading, lists backlinks.
+  No editing — edits stay in Obsidian (or the Inbox approval flow).
+- Chat: `[[Note#Heading]]` citations in answers and `done.grounding.citations` for `source: vault` become links to
+  the viewer; docs-folder citations (`path#heading`) open the same viewer if the file is under `DOCS_ROOT`.
+- Optional: a simple title/alias search box on `/Notes` backed by `kb/search` (no model).
+
+**Acceptance**
+- The note viewer opens a cited note from a chat answer in one click, without a model call; path traversal and
+  hidden files are refused; nothing is writable through it.
+- A run produces ≤ 5 proposals; nothing is written outside `AI/` before approval; approve, reject and stale-sha
+  paths work for every proposal kind.
+- A PRIVATE source item never reaches a cloud model (decision log + LiteLLM logs); cloud drafts contain no raw Gate 0
+  findings, and placeholders are restored before the Inbox.
+- A rejected proposal is not proposed again; `Views/` notes never appear in `search_knowledge` results.
+
+## 10d. Todo categories & personal logs — planned (draft, decided 2026-11-05; details open)
+
+**Todo categories** (from Notion: separate pages today)
+- Add `category` to `todos` (free text with autocomplete; maybe `tags` later). Initial: work, side project,
+  personal, shopping. `personal` may be a PRIVATE category (local only, no LINE content).
+- `/Todos`: grouped by category with counts, category filter, a "Today" view (overdue + due today across
+  categories). Shopping renders as a compact checklist without due dates. `add_todo` (tools, MCP) gets `category`.
+- Import: Notion CSV, open items only, category per source page.
+- Overdue todos are never deleted or auto-closed: they stay open and are marked overdue (red "逾期 N 天" badge in
+  `/Todos` and the Today page, an "overdue" group at the top, `list_todos` output and the morning brief say
+  "overdue"). Only the owner completes or deletes a todo. (Today nothing auto-deletes either; the change is the
+  overdue display.)
+
+**Personal logs** (reviews live in the vault, not in `todos`)
+- Media (book, movie, anime, series, game) share one collection `Media/` with `type`; trips, food and product
+  reviews get their own collections. Shared frontmatter: `type`, `status`, `rating`, `date`, `tags`.
+- One note per item: the owner's own words kept verbatim; AI-written sections inside `<!-- harness:curated -->`.
+- Review flow: owner sends "title + raw feedback" (e.g. the 2026-11-05 *Starman* chat) → AI fills a per-type
+  template → preview → saved on confirm. Factual fields (year, cast, IDs) only from pages actually read, else
+  marked unverified; the AI never invents a rating.
+- Agent may create notes in these collections and update `status`/`rating` without approval; body edits still go
+  through Inbox approval.
+- nodeReact `/Logs`: read-only list by type and status, quick add and status/rating edits (frontmatter only), links
+  to the note viewer (§10c) and `obsidian://`. No review editor.
+- Obsidian Bases views in `Views/` per collection, plus a cross-type "all reviews" view.
+
+**Open:** folder names and per-type templates/fields, note language (fixed or follow the input), exact write
+permissions for the agent, whether `personal` is always PRIVATE, `tags` on todos.
+
 ## 11. GPU governor
 
 Container with NVML access (`capabilities: [utility]`) and read-only Docker events via socket proxy.
@@ -705,6 +851,35 @@ Approval:
 - Background approvals persist (Postgres checkpoint) → Inbox card in nodeReact + LINE push notification → resume on approval.
 
 Output: SSE (web), LINE reply/push (never PRIVATE content), Inbox, memory write, PR link.
+
+### Planned: plan critique (decided 2026-11-05, not built)
+The L9 check above asks "does the answer address the request". Plans need a second opinion on *content*:
+- **Applies to** generated plans: travel itineraries, shopping recommendations, SOP/curation drafts (§10c), review
+  drafts (§10d), and other multi-step plans (task type / route marked `critique: true` in policy).
+- **Critic:** a different, stronger model than the author (default `cloud_strong`; local Qwen on PRIVATE threads)
+  with a per-type checklist, e.g. itinerary → time feasibility, travel times, opening days, budget, missing
+  bookings; shopping → budget, real listings, requirement fit; SOP → missing steps, unclear owner, invented facts.
+- **Output:** a structured list of issues (severity, what, suggestion). High-severity issues trigger one revision
+  by the author model; remaining issues are appended to the answer as a short "⚠️ Check" block. Max one revision.
+- Runs after the L9 check, before `done`; counts toward the turn's cost cap; when the kill switch blocks cloud the
+  critic falls back to local Qwen, and it is skipped when that would need the GPU while GAMING.
+- Acceptance: an itinerary with an impossible transfer or a closed-day visit is flagged; a clean plan passes with
+  no block; at most one extra revision per turn.
+
+### Planned: per-type checks beyond L9 (decided 2026-11-06, not built)
+L9 stays for every type. These add checks that fit each type, mostly in code (no extra model call):
+
+| Type | Extra checks | On failure |
+|---|---|---|
+| chat (§12d) | citation check (today) | L9 escalation; on LINE warning only (§19) |
+| research (§12d) | numbers/dates/prices in the answer must appear in a cited excerpt (code match); time-sensitive questions flag sources older than N days; conflicting sources are shown side by side, not resolved silently; claim checks run on a cloud model (not PRIVATE) | unmatched claims go to "Unverified"; next-step suggestion to confirm from a primary source |
+| deep research (§12d) | plan critique of the sub-questions before starting; per-section claim checks as research; key conclusions need 2 independent domains or 1 T1 source; spot-check quotes by re-fetching the page; final checklist review by a different model (answers the question, gaps, contradictions) | issues listed at the end of the report |
+| assistant | **claimed action without a tool call** ("已加入/已建立" but no write tool ran this turn) fails; **read back** after a write (todo/event exists with the requested date, time and title); relative dates ("明天下午三點") resolved in code and echoed with the weekday ("11/7 (五) 15:00"); warn on a likely duplicate todo/event | claimed-action failure reruns once without escalation after writes; read-back mismatch is reported in the answer |
+| shopping (§12c) | every pick within budget (code); required specs (capacity, size, model) present in the listing title/specs; show price fetch time and re-fetch top picks when older than N hours; one entry per product across stores (or merged); dead links dropped | failing picks are dropped or labelled |
+
+Priority: assistant claimed-action and read-back first (cheapest, most common failure), then shopping budget/spec,
+then research number matching.
+**Open:** N for freshness (research, shopping), duplicate rules for todos/events, deep-research quote sample size.
 
 ## 12a. Grounded answering (clarify → verify claims → cite) — decided 2026-10-22, implemented 2026-10-28 (phase 8a; default mode cite_only)
 
@@ -1074,6 +1249,112 @@ Goal: the agent can navigate, click, fill forms and use sites where the owner is
   - non-shopping turns, private threads.
 - **Later:** product cards in `/Agent` (image, price, button) from `answer.products`; feebee/BigGo price comparison; price-drop watch as a scheduled job; LINE flex carousel.
 
+## 12d. Answer tiers — chat / research / deep research — planned (decided 2026-11-05, not built)
+
+Three depths instead of one global `grounding.mode`; the tier is chosen per request.
+
+| | **chat** | **research** | **deep research** |
+|---|---|---|---|
+| Based on | today's `cite_only` | today's `verify` mode (§12a) | new background job |
+| Web | search + read; only citations checked | search + read; every claim checked, "Unverified" block | multi-round search, sub-questions, cross-checked sources |
+| Clarify first | only when very ambiguous | when scope is unclear | confirms scope and budget before starting |
+| Runs | foreground, seconds (today's caps: 3 searches, 4 reads, 90 s, $0.05) | foreground with progress, up to ~2–3 min, own caps (`research.*`) | background, minutes to tens of minutes, own budget (e.g. ≤ $1) |
+| Output | chat answer | chat answer + verification result + next steps | report saved to the vault (`AI/Research/`) + Inbox item; follow-ups in the thread read the report |
+| Model | router decides | cloud (verify mode is too noisy on the 9B model) | `cloud_strong` |
+
+**Choosing the tier**
+- Explicit prefixes `/chat`, `/research`, `/deep` (like `/local`, `/code`).
+- Otherwise the Jev router picks **chat vs research** only (both foreground, so a wrong pick costs seconds, not
+  minutes). Deep research is never automatic: only `/deep` or a next-step suggestion the owner picks.
+- Router choice and owner overrides are logged in `decisions`, so the chat/research split can be tuned with replay.
+
+**Next-step suggestions** (how an answer leads deeper; generated in the same model call, negligible cost)
+- research answers end with 2–4 suggested next steps derived from the result: confirm "Unverified" claims from a
+  primary source, compare options the answer mentioned, expand a sub-topic, or escalate to deep research.
+- Each suggestion shows its tier and rough cost/time (e.g. "🔍 research", "📚 deep research, ~10 min"); web shows
+  buttons (reuse the clarify option UI), LINE quick replies. Picking one runs it as the next turn in the same
+  thread with that tier, so earlier sources are reused rather than re-fetched.
+- chat: 2–3 follow-up questions in the same message as the answer (web buttons, LINE quick replies on that
+  message, never a separate message). Add "research this?" only when the router saw a research-type intent.
+- deep research: the report ends with "open questions", each one startable as a new research/deep run.
+- The system never escalates on its own; every step deeper is the owner's choice.
+
+**Chat speed (decided 2026-11-06, not built)**: the chat tier is web-first and should answer quickly, but it does
+not need to be extremely fast. Routing and model choice stay as they are (Jev picks the tier, about 80 % of web chat
+runs on the local 9B model).
+- Verification: chat keeps today's L9 whole-answer check (§12, phase 10b: score, rerun on a bigger model,
+  warning). It has no per-claim check; that is the research tier.
+- Always search: already on (`grounding.always_search: true`, chitchat skipped). The `plan_search` model call that
+  writes the queries stays.
+- Parallel queries: keep the current count (at most 2 queries from `plan_search`, cap `tool_limits.web_search: 3`).
+  Ask for different angles (e.g. official/primary source + latest news or reviews). Run them concurrently instead
+  of one after another (`grounded.py` cite_only search loop). Page reads run concurrently too.
+- Snippets first: give the compose step the Brave result snippets. Read full pages only when the snippets are not
+  enough. Each page read gets a short timeout (about 2–3 s); a page that is too slow is skipped, not waited for.
+- One message per turn: no progress messages, partial answers, or late follow-up messages (LINE replies are
+  limited, so every extra message costs). The web client keeps its existing streaming and status events.
+- Measure: log time to first token and total turn time per answer, so the change can be checked.
+- Done 2026-11-06: `plan_search` sees the last `grounding.search_history_turns` (3) earlier turns, so follow-ups
+  like "那價格呢?" get the subject in the query; the assistant route keeps 20 turns (was 8).
+- LINE threads are chat tier only (§19 "Planned: notifications on Telegram, LINE replies only").
+
+**PRIVATE threads:** local models only (§6), so research quality drops; research on a PRIVATE thread may fall back
+to chat with a note, and deep research is refused unless the owner confirms a local-only run.
+
+**Open:** research/deep caps, report format, how many deep runs may run at once, whether deep research uses
+several parallel workers (multi-agent collaboration discussed, not decided), how chat decides that the search
+snippets are enough to skip reading full pages.
+
+## 12e. Tutor agent — planned (decided 2026-11-06, not built)
+
+A language tutor, English first (owner level B2; goals: travel and reading), later Japanese and Spanish, later other
+subjects. Web only.
+
+**Entry and routing**
+- Own route `tutor`, entered with `/tutor` or from a dedicated tutor thread on the `/Tutor` page. Jev never routes
+  there on its own. Model choice follows the normal rules (Jev picks the tier; L9 escalates on failure).
+- One **subject profile** per subject (`config/tutor/<subject>.yaml`): level, goals, focus, exercise types, checks.
+  A new language or field = a new profile, no new code path.
+
+**Learner profile** (long-term memory, per subject): level, goals, recurring error types. Every correction updates
+the error log; the most frequent error types drive the next exercises and grammar lessons.
+
+**Exercise types (MVP: all five)**
+- **Conversation + correction**: free talk or travel role-play (hotel check-in, ordering, directions, transfers,
+  lost luggage, booking problems, feeling unwell); the agent plays the other side. Corrections at B2 focus on
+  naturalness, collocations, prepositions, register and word choice; at most 2–3 main points per reply, the full
+  correction in a collapsible block.
+- **Writing correction**: travel writing (emails to hotels, complaints, reviews) and reading summaries; sentence by
+  sentence: original → fixed → one-line reason.
+- **Speaking (voice input)**: existing ASR with the language fixed to English; the raw transcript is shown. Whisper
+  tidies speech (adds articles, drops fillers), so spoken grammar errors may be hidden and pronunciation is not
+  assessed; this mode trains fluency and sentence building only.
+- **Vocabulary cards (SRS)**: words and collocations proposed from corrections and readings; the owner ticks which
+  to add (daily new-card cap, e.g. 10). FSRS scheduling, grades again/hard/good/easy. A card holds the item,
+  meaning, the owner's original sentence and the fix, one example, and its source (e.g. a book from §10d).
+  New table `tutor_cards` (+ review log); not in the vault.
+- **Grammar lessons**: offered when one error type reaches a threshold (e.g. 3 times): a short explanation plus 3
+  exercises graded in code.
+
+**Reading**: the owner brings an article or URL (or asks for one at B2–C1 on an interest) → 3–5 comprehension
+questions, word/phrase picks for cards, a written summary that is corrected. Books from the reading list (§10d)
+tag their cards with the title.
+
+**Travel tie-in**: when an upcoming trip is in the calendar or vault, the tutor may suggest role-plays for it.
+
+**nodeReact `/Tutor`** (tabs): conversation (corrections in a side panel), writing, review (card flip + grades),
+progress (error types over time, errors per 100 words, card retention). The Today page shows "N cards due"; the
+daily review reminder goes through Telegram (§19), never LINE.
+
+**Checks** (in addition to L9, §12): a correction must quote the owner's original text and give both versions;
+card and word explanations must have every required field (meaning, part of speech, example + translation),
+checked in code. For Japanese later: turn off the L9 Simplified-Chinese check on the tutor route (Japanese kanji
+such as 学/会/国 overlap with Simplified). Watch the L9 failure rate on the 9B model; revisit model choice only if
+escalations are frequent.
+
+**Open:** card table schema and FSRS library, error-type taxonomy, whether role-plays draw on real trip data
+automatically or only on request, Japanese/Spanish profiles (furigana, JLPT/DELE levels).
+
 ## 13. Docker Compose (skeleton)
 
 ```yaml
@@ -1228,12 +1509,27 @@ re-prioritise remaining phases from real usage and the decision log.
 | 10 | RAG + long-term memory + eval set + **memory review UI** — **implemented 2026-10-29** (§10; recall@5 = 1.00 reranked / 0.88 RRF-only on 33 questions; nodeReact `/Memory` page) | recall@5 measured on eval set; memories editable/deletable in nodeReact |
 | 10a | Obsidian vault: Syncthing, indexer, writer tools, Notion import — **implemented 2026-11-04**, live-verified (§10a: edit → indexed in 0.3 s; writes only via `/vault-rw/Inbox|AI`, other edits by Inbox approval; Notion import tooling ready, import itself pending) | Notion pages imported with no broken links; edits on phone re-indexed within 1 min; agent writes only to `Inbox/` and `AI/` |
 | 10b | General L9 verify layer (§12): deterministic checks + model check (Jev/Qwen) + tier escalation (max 2) → Inbox item — **implemented 2026-11-04**, live-verified (pass: Jev 0.86 in 206 ms; forced failure: local → cloud_fast → cloud_strong → Inbox, history keeps only the last answer) | A failed check escalates local → cloud_fast → cloud_strong at most twice, then creates an Inbox item; private runs never use cloud; extra model cost measured on the eval set |
+| 10c | Knowledge curation (§10c): `vault.exclude_paths`, weekly `curate` schedule, Inbox proposals (new note / update / tidy / archive), per-item Gate 0 batching, reversible pseudonymisation; read-only nodeReact note viewer with clickable citations — **planned** | §10c acceptance list |
+| 10d | Todo categories + personal logs (§10d): `todos.category`, grouped `/Todos`; review collections in the vault, template-based review flow, nodeReact `/Logs` — **planned (draft)** | to be defined |
 | 11 | Cron/events, eval suite in CI, monthly restore test — **implemented 2026-11-04**, live-verified (brief → web thread + Inbox + LINE notice; restore test OK in 4 s) | Morning brief runs; eval regression check; restore test passes |
+| 12 | Today home page in nodeReact (§19): calendar, todos, shopping, Inbox, in-progress logs; harness status shown only on exceptions (no separate agent dashboard); one aggregate endpoint, read-only — **planned** | §19 "Today home page" acceptance list |
+| 13 | Finance dashboard (§19): Shioaji pull, finance-mailbox email ingest (statements, e-invoices) → `transactions`, owner-only nodeReact page — **planned (draft)** | to be defined |
 
 **Remaining (2026-11-04):**
 - **8b-login** — interactive browsing + owner login (§12b stage 2): not built.
 - **PRIVATE verify mode** — back `kb_search`/`kb_read` (§12) with `store.search(private=True)`; until then verify-mode claims on PRIVATE threads are labelled unverified (`cite_only`, the default, already cites the docs folder and vault).
-- **Gate 1** (§6) — deferred by design; build only if the decision log shows Gate 0 missing private data.
+- **Gate 1** (§6) — deferred by design; build only if the decision log shows Gate 0 missing private data. Not needed under the revised privacy model (§6, 2026-11-05).
+- **Revised privacy model** (§6) — planned: PRIVATE only for secrets and owner-marked threads/notes; drop keywords and thread stickiness; calendar and `AI/Daily/` open to cloud.
+- **10d Todo categories & personal logs** (§10d) — draft; open questions listed there.
+- **13 Finance dashboard** (§19) — draft; open questions listed there.
+- **Answer tiers** (§12d) — planned: chat / research / deep research per request, Jev picks chat vs research, next-step suggestions lead deeper; chat speed (parallel queries, snippets first, one message per turn).
+- **Telegram notifications + LINE replies only** (§19) — planned: every proactive message via one `notify()` to Telegram; LINE answers within the reply window, no push.
+- **Tutor agent** (§12e) — planned: `/tutor` route, English (B2, travel + reading) first; conversation/writing/speaking correction, SRS cards, grammar lessons; nodeReact `/Tutor`.
+- **Plan critique** (§12) — planned: stronger-model checklist review of itineraries, shopping picks, SOP/review drafts; one revision max.
+- **Per-type checks beyond L9** (§12) — planned: assistant claimed-action + read-back first, then shopping budget/spec, research number matching, deep-research cross-checks.
+- **Coding review before approval** (§9a) — planned: Copilot code-review + security-review on the diff, findings in the approval item.
+- **12 Today home page** (§19) — planned: nodeReact `/Today` backed by `GET /api/agent/today`; harness health only when something needs attention.
+- **10c Knowledge curation** (§10c) — planned: `Views/` exclusion, weekly curation proposals via Inbox, privacy-split routing, read-only note viewer (`/Notes`) with clickable citations.
 - **Media gaps** (§5) — no cloud ASR/vision fallback; HEIC untested live; PDFs > 50 pages skip Docling.
 - **Vault** (§10a) — Notion import (owner step); optional browser Obsidian container; Inbox triage / weekly vault health report / unindexed staging folder discussed and postponed.
 - **§17 VERIFY items** still open: `typesafe-sdk` fields + Jev retention, LINE content retention, LiteLLM/Phoenix/Smokescreen tags, least-privilege Copilot token, nodeReact nginx network name.
@@ -1344,10 +1640,93 @@ re-prioritise remaining phases from real usage and the decision log.
 - Conflicting facts: newest wins, previous kept as history; UI shows history.
 - Every agent memory write is visible in the Inbox as a low-priority item. (Implemented 2026-10-29 as nodeReact `/Memory`: memories plus a knowledge-base tab; Inbox items: phase 7.)
 
+### Today home page with exception-only harness status (nodeReact) — planned (decided 2026-11-05, not built)
+One owner-only page `/Today` (candidate nodeReact landing page) that answers "what do I need to do today"; the
+harness health view is folded into it and **only shows up when something needs attention** — no separate agent
+dashboard. nodeReact constraints: React 17, chart.js **2.9** (v2 API), Node 14 toolchain — see `AGENTS.md`.
+- **Today (always shown):** weather, today's calendar, todos overdue / due today (by category, §10d), shopping
+  list, pending Inbox approvals and questions, items in progress from `/Logs` (§10d). Essentially the morning brief
+  as a live page.
+- **Harness status (exception-only):** a single green "all OK" line when nothing is wrong; otherwise a card per
+  issue, most severe first, each linking to where it is handled (Inbox, Phoenix trace, `/status`):
+  - kill switch not `off`; GPU override pinned; unhealthy container or missing heartbeat (vault-indexer,
+    gpu-governor); queue backlog or stuck job;
+  - spend or Copilot credits ≥ 80% of the daily budget;
+  - nightly eval regression; failed schedule or backup; unresolved alerts from the last 24 h;
+  - failed verification items, ingest/parse failures, pending curation proposals (§10c).
+- **No trend charts by default.** Spend/route/latency/eval history stays in Phoenix and the `eval_runs` tables; a
+  collapsible "details" section can be added later if the owner keeps looking things up.
+- **API:** `GET /api/agent/today` (owner token, web only) — one aggregate JSON from cheap SQL + Redis reads (no
+  model calls, no Docker API per request: container health comes from the alert watcher's last check, cached in
+  Redis). Thresholds reuse the alert watcher / policy values so the page and LINE alerts agree. The page polls every
+  60 s; no SSE.
+- **Privacy:** owner-only web page, so todo/calendar titles are shown (as on `/Todos`); never exposed to LINE or
+  unauthenticated routes. Harness status items carry metadata only.
+- **Read-only first.** Controls (clear kill switch, unpin GPU) may come later behind a confirm dialog and the same
+  owner checks as `host/killswitch.sh` / `host/gpu-state.sh`; every change audited.
+- **Acceptance:** loads in < 1 s from a warm API; with a healthy harness only the "all OK" line appears; stopping
+  a container, setting the kill switch or a forced eval regression each produce exactly one card that disappears
+  when resolved; counts match `/status` and the morning brief.
+
+### Finance dashboard — planned (draft, decided 2026-11-05; details open)
+A separate owner-only nodeReact page (not part of `/Today`): net worth, income/spending, investments.
+Builds on nodeReact's existing Stock and Bitfinex pages instead of duplicating them.
+- **Data sources** (researched 2026-11-05):
+  - Investments: SinoPac **Shioaji** API, scheduled read-only pull (`list_positions`, `list_profit_loss`,
+    `settlements`, `margin`, `account_balance`; query-only API key, no CA needed; 25 accounting calls / 5 s). It
+    gives only the settlement-account balance, not bank transactions. Crypto: existing Bitfinex integration.
+  - Banks and credit cards: monthly e-statement emails (encrypted PDFs). Taiwan Open Banking account data is
+    TSP-only, so no personal bank API.
+  - E-invoices: the platform's monthly email (format to check: attachment or body, line items or totals only).
+  - Fallback: manual CSV upload in nodeReact. Browser automation was considered and rejected (captcha,
+    Cloudflare, bank ToS, risk) — revisit only if email fails.
+- **Email ingest (new):** a dedicated finance mailbox (forwarding rules from the main inbox), read over IMAP by a
+  scheduler job; route by sender, decrypt PDFs locally (passwords in `.env`), extract via the media-worker, parse
+  into a `transactions` table (amounts parsed by code, never by a model; dedupe per statement/invoice), failures →
+  Inbox item.
+- **Rules:** numbers are computed by SQL/code; the AI only explains and answers questions. Finance data is
+  owner-marked PRIVATE (local models only; revised privacy model, §6); cloud sees aggregates at most. LINE and the
+  morning brief get threshold alerts (e.g. budget 80%) without amounts.
+- **Open:** e-invoice email format, categorisation (merchant rules vs local model), budgets, which banks/cards,
+  whether aggregates may go to cloud, page layout.
+
 ### Health checks & LINE alerts
 - Compose `healthcheck` on every service; `alert-watcher` job (agent-scheduler, every minute) checks: unhealthy containers, queue age > threshold, jobs stuck > timeout, LiteLLM spend > 80%, backup failure, disk/ZFS pool > 85% or not ONLINE, gpu-governor heartbeat missing.
 - Alerts → LINE push to owner, deduplicated (one alert per issue per hour) + logged to Inbox.
 - Quiet alerts (policy `alerts.quiet_prefixes`, default `queue:` = a job waiting too long, e.g. during the nightly eval): logged to the `alerts` table only, no LINE/Inbox; the next morning brief lists the last 24 h of them (2026-11-04).
+
+### Planned: notifications on Telegram, LINE replies only (decided 2026-11-06, not built)
+LINE push messages count against a monthly quota; reply-token replies are free. Proactive messages move to Telegram
+(no monthly quota), and LINE only answers the owner's messages.
+
+**Telegram: notifications only (one-way)**
+- One exit `notify(kind, text, link=None)` (e.g. `app/channels/notify.py`) replaces every proactive `line.push`:
+  morning brief notice (`brief.py`), todo reminders (`jobs/todo_jobs.py`), event notices (`events.py`), alerts
+  (`jobs/alerts.py`), Inbox questions and approvals (`inbox.py`, `tools/calendar.py`, `vault_writer.py`),
+  background job done (`graphs/coding.py`, `jobs/worker.py`).
+- Telegram Bot API `sendMessage` to the owner's chat id (`TELEGRAM_BOT_TOKEN`, `telegram.owner_chat_id`); add
+  `api.telegram.org` to the egress allowlist. Existing rules stay: quiet hours, alert dedup, quiet alerts.
+- No commands, chat or buttons on Telegram: approvals and answers link to the web `/Inbox`. Incoming Telegram
+  messages are ignored.
+- Privacy unchanged: Telegram bot messages are not end-to-end encrypted, so PRIVATE items send only a content-free
+  notice (as `events.py` and the calendar/vault approvals do for LINE today).
+
+**LINE: chat only, answered within the reply window**
+- LINE already forces the chat route and caps the model at `cloud_fast` (`decision.py` rule 6); the model choice
+  stays (local or cloud_fast, as the router picked).
+- New: a LINE turn has a deadline below `line_reply_token_ttl_s` (e.g. 35 s of 50 s, VERIFY the real expiry). Near
+  the deadline it stops searching/reading and answers with what it has. On LINE a failed L9 check does not
+  escalate to a bigger model; the warning is appended instead.
+- The push fallback in `line.deliver` is removed: a turn that still misses the window is dropped and logged as a
+  quiet alert (no push). Goal: zero LINE push messages per month.
+- LINE threads stay chat tier (§12d): follow-up suggestions are chat follow-ups only, no research or deep research.
+- Clarify on LINE uses the reply token of the owner's answer (already the case); VERIFY it covers every round.
+
+**Acceptance:** all proactive messages arrive on Telegram, none on LINE; a month of use shows zero LINE pushes; a
+LINE answer never arrives after the reply window; PRIVATE notices on Telegram carry no content.
+
+**Open:** what the GAMING (`local_cpu`) path does when it cannot meet the LINE deadline (short "ask on the web"
+reply vs. a smaller answer).
 
 ### Egress allowlist (`config/egress-allowlist.yaml`)
 - Allowed: TypeSafe API, OpenAI, Anthropic, LINE API/content, GitHub (api, github.com, Copilot endpoints — VERIFY list), package registries (npm, PyPI) for sandboxes, Hugging Face (model downloads, can be disabled after setup), Ollama registry.
@@ -1362,7 +1741,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Alerts and memory writes feed the Inbox; `inbox_cleanup_cron` (04:00) deletes old done/low items (`inbox:` in policy.yaml).
 - nodeReact pages `/Todos` and `/Inbox` (approve/reject/answer, dismiss, bulk-dismiss memory/alert). Failed verification after escalation → Inbox `verify` item (phase 10b).
 
-### nodeReact tooling notes (found during phase 7)
+### nodeReact tooling notes (found during phase 7; rules for agents in `AGENTS.md`)
 
 - **Run everything on Node 14:** build, tests and commands for nodeReact go in a Node 14 container (`node:14-bullseye-slim`, git installed, `npm ci --legacy-peer-deps`), never on the host's Node 22 (see `nodeReact/AGENTS.md`).
 - **Front-end tests pass on Node 14 as-is:** `npx jest --config jest.front.cjs --forceExit src/front` gives 18 suites / 1331 tests with the original lockfile. The `@babel/core@7.12.10` failure only happened on host Node 22, so no babel upgrade is needed (an upgrade would rewrite the lockfile to v3 and break plain `npm ci`).
@@ -1388,7 +1767,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Approval design: instead of a graph `interrupt()`, add/delete create an Inbox `approval` item (`detail.calendar`, no run) and the Inbox `answer` route executes it. The existing Inbox UI needed no change; Reject = dismiss. Approving twice is refused (item no longer open).
 - Verified live: read of the real calendar, `/local` run proposed an event (Inbox item), Approve created it in Google, then deleted. The delete-proposal path is only covered by tests. The OAuth app is unverified-production (100-user cap, no 7-day token expiry).
 
-- **Calendar vs todo on LINE (2026-10-30):** local Qwen filed every "add ..." as a todo, worse on long LINE threads (it copies earlier tool calls). Fixes, in order of effect: `tools.narrow_for_intent` (deterministic, no model: add verb + time of day and no todo word → `add_todo` removed; explicit todo/reminder → `add_event` removed); the assistant route hides earlier turns' tool calls and keeps `executor.assistant_history_turns` (8) turns (`graphs.main.drop_old_tool_turns`); the prompt rule. A Jev/cloud classifier was rejected: the text is PRIVATE. LINE gets a content-free notice when a proposal was made.
+- **Calendar vs todo on LINE (2026-10-30):** local Qwen filed every "add ..." as a todo, worse on long LINE threads (it copies earlier tool calls). Fixes, in order of effect: `tools.narrow_for_intent` (deterministic, no model: add verb + time of day and no todo word → `add_todo` removed; explicit todo/reminder → `add_event` removed); the assistant route hides earlier turns' tool calls and keeps `executor.assistant_history_turns` (8; 20 since 2026-11-06) turns (`graphs.main.drop_old_tool_turns`); the prompt rule. A Jev/cloud classifier was rejected: the text is PRIVATE. LINE gets a content-free notice when a proposal was made.
 - **Claimed-success guard (2026-10-30):** on LINE, Qwen answered "proposal created" after only `get_current_time`. `tools.required_tool` names the write tool a clear request must call (add verb + time of day → `add_event`; 新增待辦 → `add_todo`); `build_graph(require_tool=...)` nudges the model once if it tries to finish without calling it, then replies that the action failed. Private LINE notices (`_private_line_notice`) report what the turn really did.
 
 ## Tool-call reliability with the small local model (2026-10-30)
