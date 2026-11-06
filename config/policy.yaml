@@ -262,6 +262,7 @@ vault:                       # phase 10a (§10a): Obsidian vault VAULT_DIR -> /v
   attachment_max_chars: 100000
   daily_folder: AI/Daily     # nightly summary + `## Log` (append_daily_note); always privacy: private
   notify_line: true          # LINE push when a note edit waits for approval (no note content)
+  exclude_paths: [Notion]    # folders kept in the vault but never indexed/linked/searched/read by agents (raw import)
 
 memory:                      # phase 10 (§10): app/memory.py, LangGraph PostgresStore
   enabled: true

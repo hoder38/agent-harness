@@ -27,6 +27,8 @@ def _rel(base: Path, path: str) -> str | None:
         return None
     if any(seg.startswith(_IGNORE) or seg.startswith(".") for seg in rel.split("/")):
         return None   # temp files (Syncthing, our atomic writes) and hidden folders
+    if vault.is_excluded(rel):
+        return None   # vault.exclude_paths: no re-index (or full-scan fallback) while e.g. an import lands there
     return rel
 
 

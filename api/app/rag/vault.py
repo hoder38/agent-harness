@@ -224,19 +224,35 @@ def safe_rel(path: str) -> str | None:
 
 
 # ---------------------------------------------------------------- scanning
-def scan_all(base: Path) -> dict[str, Path]:
-    """Every non-hidden regular file (notes and attachments), relative posix path → file."""
+def is_excluded(rel: str) -> bool:
+    """Under a `vault.exclude_paths` folder (vault-relative prefix, case-insensitive): kept in the vault but never
+    indexed, linked, searched or read by agents (e.g. a raw Notion import before clean-up)."""
+    low = rel.strip("/").lower()
+    for pre in cfg().get("exclude_paths") or []:
+        pre = str(pre).strip("/").lower()
+        if pre and (low == pre or low.startswith(pre + "/")):
+            return True
+    return False
+
+
+def scan_all(base: Path, *, include_excluded: bool = False) -> dict[str, Path]:
+    """Every non-hidden regular file (notes and attachments), relative posix path → file. `exclude_paths` folders
+    are left out unless `include_excluded` (vault_tool clean-up)."""
     out: dict[str, Path] = {}
     if not base.is_dir():
         return out
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        if not include_excluded:
+            rel_dir = Path(dirpath).relative_to(base).as_posix()
+            dirnames[:] = [d for d in dirnames if not is_excluded(d if rel_dir == "." else f"{rel_dir}/{d}")]
         for f in sorted(filenames):
             if f.startswith("."):
                 continue
             p = Path(dirpath) / f
-            if not p.is_symlink():
-                out[p.relative_to(base).as_posix()] = p
+            rel = p.relative_to(base).as_posix()
+            if not p.is_symlink() and (include_excluded or not is_excluded(rel)):
+                out[rel] = p
     return out
 
 
@@ -410,7 +426,9 @@ async def index_changed(changed: set[str], base: str | Path | None = None) -> di
     that is not a plain file (a renamed/deleted folder) falls back to a full scan."""
     base = Path(base or root())
     files = scan_all(base)
-    rels = {r for r in changed if (safe := safe_rel(r)) and safe == r}
+    rels = {r for r in changed if (safe := safe_rel(r)) and safe == r and not is_excluded(r)}
+    if not rels:
+        return _new_stats()
     if any(r not in files and not is_note_path(r) and not is_file_target(r) for r in rels):
         return await index_vault(base, wait_s=600)     # a folder moved or was deleted
     if not await _lock(600):
@@ -450,7 +468,7 @@ async def read_note(path: str, *, private: bool, max_chars: int = 20_000) -> tup
     if not rel:
         return None, "invalid path"
     p = root() / rel
-    if not p.is_file():
+    if is_excluded(rel) or not p.is_file():
         files = scan_all(root())
         hit = Resolver(files).resolve(Link("link", path), "")
         if not hit or not is_note_path(hit):

@@ -31,7 +31,7 @@ def _in(rel: str, folder: str) -> bool:
 
 
 def report(base: Path, folder: str = "", *, all_unresolved: bool = False) -> dict[str, Any]:
-    files = vault.scan_all(base)
+    files = vault.scan_all(base, include_excluded=True)
     res = vault.Resolver(files)
     notes = [r for r in files if vault.is_note_path(r) and _in(r, folder)]
     broken, links = [], 0
@@ -86,7 +86,7 @@ def notion_meta(text: str, notion_id: str | None) -> str:
 def notion_fix(base: Path, folder: str = "Notion", *, strip_ids: bool = False, dry_run: bool = False) -> dict[str, Any]:
     from ..vault_writer import atomic_write
 
-    files = vault.scan_all(base)
+    files = vault.scan_all(base, include_excluded=True)
     resolver = vault.Resolver(files)
     scope = [r for r in files if _in(r, folder)]
     renames: dict[str, str] = {}

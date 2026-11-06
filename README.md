@@ -129,6 +129,7 @@ The eval cases in `config/rag_eval.yaml` expect `agent-harness/ARCHITECTURE.md` 
 - **Location:** `VAULT_DIR` (default `/home/hoder/vault`), a git repo with folders `Inbox/ Notes/ Notion/ Projects/ Areas/ Resources/ Archive/ AI/ Attachments/`.
 - **Indexing:** the `vault-indexer` service re-indexes a changed note in under a second. It reads tags, aliases, `privacy:` frontmatter and links; embedded PDFs and images are extracted by the media-worker. Answers cite notes as `[[Note#Heading]]`.
 - **Agent writes:** the agent writes only to `Inbox/` (`capture_note`, `/note <text>`) and `AI/` (`append_daily_note`, the nightly `AI/Daily/` summary at 23:50). An `edit_note` anywhere else becomes an Inbox item with a diff; approve applies it, but only if the note has not changed since.
+- **Excluded folders:** folders listed in `vault.exclude_paths` (`config/policy.yaml`, hot-reloads; default `[Notion]`) stay in the vault, synced and committed, but are never indexed, linked, searched or read by the agent. Remove a folder from the list to start using it.
 - **Copilot:** the `harness-memory` MCP server offers `search_notes` and `read_note` (non-private notes only).
 - **History:** one git commit per night (00:15, `agent-vault-commit.timer`).
 
@@ -143,7 +144,7 @@ docker compose exec syncthing syncthing cli --gui-address=127.0.0.1:8384 \
   --gui-apikey="$(docker compose exec -T syncthing sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p' /var/syncthing/config/config.xml | tr -d '\r')" show system | grep myID
 ```
 
-**Notion import:** in Obsidian desktop, open the Importer plugin, choose Notion, and import into `Notion/`. Use either the API (an `ntn_…` integration token; databases become `.base` files) or an HTML export zip (Include everything, Create folders for subpages). Then:
+**Notion import:** in Obsidian desktop, open the Importer plugin, choose Notion, and import into `Notion/`. `Notion/` is in `vault.exclude_paths`, so the raw import is not used until you remove it from that list. Use either the API (an `ntn_…` integration token; databases become `.base` files) or an HTML export zip (Include everything, Create folders for subpages). Then:
 ```bash
 docker compose exec -T agent-api python -m app.tools.vault_tool notion-fix --dry-run   # then without --dry-run; --strip-ids drops Notion ids from file names
 docker compose exec -T agent-api python -m app.tools.vault_tool links --folder Notion  # broken-link report, exit 1 if any

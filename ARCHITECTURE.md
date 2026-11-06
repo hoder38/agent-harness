@@ -671,6 +671,7 @@ vault/
 - Frontmatter (`tags`, `aliases`, `privacy`), inline `#tags` (not in code), `[[wikilinks]]`, `![[embeds]]`, `[md](links.md)`. Tags and aliases are stored on the document and added to the keyword index; a query that equals a note's title or alias always keeps that note (exact "named" match, even below the rerank floor).
 - Link resolution like Obsidian: exact path → path suffix → shallowest note of that name; relative md links resolved from the note. `note_links(src, dst, dst_path)` (dst unresolved until the note exists). Search seeds `rag.link_seeds` (3) top hits and adds up to `rag.link_candidates` (3) chunks of 1-hop linked notes, forward or backlink, before rerank.
 - Rendered text for chunking: wikilinks → their display text, embeds → `📎 name`. Embedded attachments (`vault.attachment_kinds`: doc, image; ≤ 50 MB) go to the media-worker (stored with `private=True`, so local only); the extracted text is indexed under the embedding note as heading `📎 name` and cached by sha in `vault_files`. An attachment change reindexes the notes that embed it.
+- Excluded folders (2026-11-06): `vault.exclude_paths` (vault-relative folder prefixes, case-insensitive, default `[Notion]`) are skipped by `scan_all` (indexing, link resolution), the watcher and `read_note`; `vault_tool` (`notion-fix`, `links`) still sees them. Lets a raw import sit in the vault unused until it is cleaned; removing the entry indexes it on the next full scan (5-min cron or `vault_tool index`).
 - Privacy: frontmatter, `privacy_rules.yaml` `private_paths` (vault-relative globs), Gate 0 content scan → `privacy_tag`. `AI/Daily/` is private only when that day includes a PRIVATE thread (§6, 2026-11-06).
 - Citations: `[[Note#Heading]]` (vault path without `.md`, last heading); attachment text cites `[[file.pdf]]`.
 - Measured: a file edit is searchable ~0.3 s after the write (watcher), well inside the 1-minute target.
@@ -701,7 +702,7 @@ owner approval**.
   `Resources/`); open todos → `todos` table (nodeReact `/Todos`, reminders, tools, MCP); events → Google Calendar;
   short facts/preferences → `/remember` memories; secrets → a password manager, never the vault.
 - **Views** (dashboards, Bases, boards, link lists) go in `Views/` and are excluded from RAG — they carry little
-  text and crowd out real notes. Needs a new `vault.exclude_paths` (vault-relative globs) in the indexer.
+  text and crowd out real notes. Add `Views` to `vault.exclude_paths` (folder prefixes, implemented 2026-11-06 for the raw Notion import).
 - **Worth keeping as notes** ("would I ask the agent this in six months, and only I know the answer?"): decisions
   and their reasons, problems and fixes, verified procedures (SOPs), project context, learning summaries in the
   owner's words, personal reference (models, specs, account purposes, contacts), meeting outcomes. Not worth it:

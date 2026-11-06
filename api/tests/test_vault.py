@@ -147,6 +147,22 @@ async def test_read_note_hides_private_from_cloud(vdir, monkeypatch):
     assert (await vault.read_note("../etc/passwd", private=True))[1] == "invalid path"
 
 
+async def test_exclude_paths_hide_folder_from_agents(vdir, monkeypatch):
+    from app.rag import watcher
+
+    monkeypatch.setattr(vault, "cfg", lambda: {"exclude_paths": ["notion"]})
+    (vdir / "Notion" / "sub").mkdir()
+    (vdir / "Notion" / "sub" / "raw.md").write_text("raw import\n")
+    (vdir / "Notion" / "top.md").write_text("raw\n")
+    (vdir / "Notes" / "Notion-ish.md").write_text("kept\n")
+    assert sorted(vault.scan_all(vdir)) == ["Notes/Notion-ish.md"]
+    assert len(vault.scan_all(vdir, include_excluded=True)) == 3
+    assert watcher._rel(vdir, str(vdir / "Notion" / "top.md")) is None
+    assert (await vault.read_note("Notion/top", private=True))[1] == "no note 'Notion/top'"
+    assert (await vault.read_note("raw", private=True))[1] == "no note 'raw'"
+    assert (await vault.index_changed({"Notion/top.md"}, vdir))["added"] == 0
+
+
 def test_notion_fix_rewrites_links_and_strips_ids(vdir):
     from app.tools import vault_tool
 
