@@ -251,9 +251,11 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
   `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other leading `/word` (e.g. `/new`) replies "Unknown command" + the
   `/help` list. Paths such as `/etc/hosts …` are not commands.
 - Secret/PII regex scan (API keys, tokens, private keys, ID numbers, card numbers, phone, email). Redact for any non-local use.
-- **Source tags:** content originating from mail, calendar, finance docs, `~/private`, personal notes ⇒ `privacy_tag=PRIVATE`.
-- **LINE is never PRIVATE (2026-10-30):** for `channel="line"` Gate 0 always returns no privacy tag (keywords, sources,
-  patterns and thread stickiness are ignored); secrets and PII are still redacted before any cloud call. Only web
+- **Source tags:** content originating from mail, finance docs, `~/private`, private vault notes ⇒ that message runs on a
+  local model only (`local_only`, since 2026-11-06; see "Privacy model revised" below). Only an owner-marked thread
+  gets `privacy_tag=PRIVATE`.
+- **LINE is never PRIVATE (2026-10-30):** for `channel="line"` Gate 0 always returns no privacy tag (sources, patterns
+  and the thread mark are ignored); secrets and PII are still redacted before any cloud call. Only web
   threads can be PRIVATE. "Never send PRIVATE content to LINE" below therefore means content from PRIVATE *web*
   threads (notices, approvals, reminders), which LINE receives only as content-free notices.
 - Budget check (daily $ per provider, Copilot AI credits).
@@ -264,7 +266,7 @@ Keep the interface (`gate1(text) -> is_private`) as a no-op stub returning `None
 - Only when Gate 0 is inconclusive on free-form text. Output: `is_private: bool`.
 - When `gpu_state=GAMING`: skip and treat inconclusive as PRIVATE for background jobs.
 
-### Privacy model revised — secrets + owner choice only (decided 2026-11-05, planned, not built)
+### Privacy model revised — secrets + owner choice only (decided 2026-11-05, implemented 2026-11-06)
 Measured over 14 days: 20 of 367 requests were PRIVATE, 17 of them only because the thread had once contained
 PRIVATE content, the rest from keywords (`行程` also matched travel itineraries). Local models are much weaker than
 cloud, so PRIVATE should be rare and deliberate. New rules:
@@ -282,6 +284,26 @@ cloud, so PRIVATE should be rare and deliberate. New rules:
 - Unchanged: LINE never receives PRIVATE content; morning brief LINE text stays content-free; existing PRIVATE
   threads/notes keep their tag (no automatic downgrade).
 - Gate 1 is not needed for this model; it stays deferred.
+
+Implementation (2026-11-06):
+- `gate0()` returns `privacy_tag=PRIVATE` only for an owner-marked thread. A `private: true` pattern or a
+  `private_sources` hit sets `Gate0Result.local_only`: `decision.py` rule 1b pins that message to `local` (beats
+  `/cloud`; `/code` becomes `chat`, Copilot is cloud), but the run is **not** private. Its stored text is redacted and
+  it gets no PRIVATE notes/memories, so a later cloud turn in the same thread cannot see anything private.
+  `/remember` and `/note` still store a local-only fact/note as private; outgoing web queries with a hit are blocked.
+- Only owner-marked PRIVATE threads keep unredacted text in their history (`pipeline.submit`).
+- `PUT /api/agent/threads/{tid}/private {"private": true}` marks a thread (audited, kind `privacy`). One-way: `false`
+  on a PRIVATE thread returns 409 (its history holds unredacted text); the LINE thread returns 400. nodeReact chat
+  shows a 🔓 button (confirm dialog) on web chats, including a new chat before its first message.
+- `private_keywords` is gone from `privacy_rules.yaml`, `gate0.py` and `rag/store.doc_privacy`; `private_sources`
+  dropped `calendar` and `personal_notes`. Documents already indexed as PRIVATE by a keyword keep that tag until
+  they change.
+- Calendar tools are offered on every assistant run (`tools_for` lost its `local` argument); approval items are no
+  longer private and the LINE notice no longer says "private".
+- Morning brief: the `web:brief` thread is no longer marked private and its Inbox item is normal (owner decision
+  2026-11-06); the existing mark was cleared once by hand.
+- `AI/Daily/`: `vault_daily.run` writes `privacy: private` only if one of that day's episodes is private; a note
+  already private stays private (`_flip_private` only upgrades).
 
 ### Gate 2 — Jev router
 Single `system_one` call on **redacted** text/summary only. Never send PRIVATE content.
@@ -649,7 +671,7 @@ vault/
 - Frontmatter (`tags`, `aliases`, `privacy`), inline `#tags` (not in code), `[[wikilinks]]`, `![[embeds]]`, `[md](links.md)`. Tags and aliases are stored on the document and added to the keyword index; a query that equals a note's title or alias always keeps that note (exact "named" match, even below the rerank floor).
 - Link resolution like Obsidian: exact path → path suffix → shallowest note of that name; relative md links resolved from the note. `note_links(src, dst, dst_path)` (dst unresolved until the note exists). Search seeds `rag.link_seeds` (3) top hits and adds up to `rag.link_candidates` (3) chunks of 1-hop linked notes, forward or backlink, before rerank.
 - Rendered text for chunking: wikilinks → their display text, embeds → `📎 name`. Embedded attachments (`vault.attachment_kinds`: doc, image; ≤ 50 MB) go to the media-worker (stored with `private=True`, so local only); the extracted text is indexed under the embedding note as heading `📎 name` and cached by sha in `vault_files`. An attachment change reindexes the notes that embed it.
-- Privacy: frontmatter, `privacy_rules.yaml` `private_paths` (vault-relative globs), Gate 0 content scan → `privacy_tag`. `AI/Daily/` is always private.
+- Privacy: frontmatter, `privacy_rules.yaml` `private_paths` (vault-relative globs), Gate 0 content scan → `privacy_tag`. `AI/Daily/` is private only when that day includes a PRIVATE thread (§6, 2026-11-06).
 - Citations: `[[Note#Heading]]` (vault path without `.md`, last heading); attachment text cites `[[file.pdf]]`.
 - Measured: a file edit is searchable ~0.3 s after the write (watcher), well inside the 1-minute target.
 
@@ -1519,7 +1541,6 @@ re-prioritise remaining phases from real usage and the decision log.
 - **8b-login** — interactive browsing + owner login (§12b stage 2): not built.
 - **PRIVATE verify mode** — back `kb_search`/`kb_read` (§12) with `store.search(private=True)`; until then verify-mode claims on PRIVATE threads are labelled unverified (`cite_only`, the default, already cites the docs folder and vault).
 - **Gate 1** (§6) — deferred by design; build only if the decision log shows Gate 0 missing private data. Not needed under the revised privacy model (§6, 2026-11-05).
-- **Revised privacy model** (§6) — planned: PRIVATE only for secrets and owner-marked threads/notes; drop keywords and thread stickiness; calendar and `AI/Daily/` open to cloud.
 - **10d Todo categories & personal logs** (§10d) — draft; open questions listed there.
 - **13 Finance dashboard** (§19) — draft; open questions listed there.
 - **Answer tiers** (§12d) — planned: chat / research / deep research per request, Jev picks chat vs research, next-step suggestions lead deeper; chat speed (parallel queries, snippets first, one message per turn).
@@ -1616,7 +1637,7 @@ re-prioritise remaining phases from real usage and the decision log.
 
 ### Schedules, morning brief, events, eval (phase 11, 2026-11-04)
 - **Schedules** (`app/schedules.py`, table `schedules`): 5-field cron in Asia/Taipei; `schedules_cron` (agent-scheduler, second 5) claims each due row once per minute. Builtins come from policy `schedules.builtin` (inserted when missing; editable/disable-able, not deletable). Owner schedules are kind `prompt` and run their text as a background cron job in `web:sched-<name>`. REST: `GET/POST /api/agent/schedules`, `PATCH/DELETE /schedules/{id}`, `POST /schedules/{id}/run`.
-- **Morning brief** (`app/brief.py`, 07:00, no model call): weather (Open-Meteo, places in policy `brief.weather`), today's calendar, overdue/due todos, Inbox counts, yesterday's spend, quiet alerts of the last 24 h. The full text goes to the private web thread `web:brief` (one message per day; follow-ups stay local) and an Inbox item `brief` (the previous one is dismissed). LINE gets only weather, counts and spend — never calendar or todo titles.
+- **Morning brief** (`app/brief.py`, 07:00, no model call): weather (Open-Meteo, places in policy `brief.weather`), today's calendar, overdue/due todos, Inbox counts, yesterday's spend, quiet alerts of the last 24 h. The full text goes to the web thread `web:brief` (one message per day; not private since 2026-11-06, so follow-ups may use cloud models) and an Inbox item `brief` (the previous one is dismissed). LINE gets only weather, counts and spend — never calendar or todo titles.
 - **Events** (`app/events.py`): `POST /events/{source}` needs a source in policy `events.sources` and a secret in `EVENT_SECRETS` (JSON); else 404. Bad HMAC → 401; body ≤256 KB JSON; deduped on `X-Event-Id` / `X-GitHub-Delivery` / body hash. Result: an Inbox item `event` (private unless the source says otherwise) and an optional LINE line. Events never start an agent run (untrusted text).
 - **Nightly eval** (`app/tools/answer_eval.py`, 02:30, background queue): `config/answer_eval.yaml` questions run through the real pipeline in throwaway `eval:*` threads (no memory written, not listed); pass = finished without a question and contains an expected string. Plus `rag_eval` recall@5/MRR. Stored in `eval_runs`; a drop vs. the previous run beyond policy `eval` thresholds → LINE alert `eval:regression`. Manual: `docker compose exec agent-worker-bg python -m app.tools.answer_eval -v`.
 - **CI**: `.github/workflows/tests.yml` runs the unit tests (no services) on every push.
@@ -1763,7 +1784,7 @@ reply vs. a smaller answer).
 ## Implemented: phase 7b — Google Calendar (2026-10-30)
 
 - `app/gcal.py` (client, refresh-token flow, in-memory access token) and `app/tools/calendar.py`. Grant file written by `host/google_auth.py` (PKCE, paste-the-redirect, no port-forward), mounted ro at `/google`. Egress allowlist gained `www.googleapis.com` and `oauth2.googleapis.com`.
-- Privacy: `private_keywords` (行事曆/日曆/行程/calendar) force PRIVATE; `tools_for(..., local=True)` is the second guard, so cloud models never get calendar tools. Event text is wrapped in `<untrusted source="calendar">`.
+- Privacy: `private_keywords` (行事曆/日曆/行程/calendar) force PRIVATE; `tools_for(..., local=True)` is the second guard, so cloud models never get calendar tools. Event text is wrapped in `<untrusted source="calendar">`. (Superseded 2026-11-06 by the revised privacy model, §6: calendar is open to cloud models.)
 - Approval design: instead of a graph `interrupt()`, add/delete create an Inbox `approval` item (`detail.calendar`, no run) and the Inbox `answer` route executes it. The existing Inbox UI needed no change; Reject = dismiss. Approving twice is refused (item no longer open).
 - Verified live: read of the real calendar, `/local` run proposed an event (Inbox item), Approve created it in Google, then deleted. The delete-proposal path is only covered by tests. The OAuth app is unverified-production (100-user cap, no 7-day token expiry).
 
@@ -1796,7 +1817,7 @@ both tools available when the request is ambiguous.
 the wrong place. The L9 verify layer (phase 10b) now catches a required write tool that was not called and
 tool errors, checking PRIVATE text with local Qwen only; it does not re-run turns that wrote data. Qwen still occasionally writes Simplified Chinese despite the prompt rule.
 
-- **LINE is chat + notify only (2026-10-30):** `decision` rule 6 forces every LINE message to the `chat` route (no todo/calendar/coding tools; models stay local or cloud_fast). A clear add-todo/add-event phrasing on LINE is answered in code ("use the web") before any model runs (`pipeline._line_write_request`), so the model cannot claim it saved something. Todos, calendar and approvals are done on the web. `GET /threads` now returns `private`; the web chat list shows 🔒 and the header shows "Private · local only" for a locked thread (a new chat unlocks).
+- **LINE is chat + notify only (2026-10-30):** `decision` rule 6 forces every LINE message to the `chat` route (no todo/calendar/coding tools; models stay local or cloud_fast). A clear add-todo/add-event phrasing on LINE is answered in code ("use the web") before any model runs (`pipeline._line_write_request`), so the model cannot claim it saved something. Todos, calendar and approvals are done on the web. `GET /threads` now returns `private`; the web chat list shows 🔒 and the header shows "Private · local only" for a locked thread (a new chat unlocks). (Since 2026-11-06 only the owner locks a thread, §6.)
 - **LINE thread reset (2026-10-30):** the first LINE thread (`line:<uid>`) was locked PRIVATE with private history, so the owner asked for a clean start. `channels.line.thread_id()` now returns `line:<uid>:2`; the old thread is hidden and never sent anywhere. The web alias `line` maps to the new thread. (Superseded the same day: calendar keywords no longer lock a LINE thread, see below.)
 
 **LINE is never PRIVATE.** `gate0(..., channel="line")` always returns no privacy tag (keywords, sources, patterns and thread stickiness are ignored); secrets and PII are still redacted before any cloud call. Web keeps the private tier.

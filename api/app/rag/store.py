@@ -4,7 +4,7 @@ documents/chunks live in Postgres: pgvector HNSW (cosine) + a 'simple' tsvector 
 (Latin words + CJK bigrams). Query: vector top-N and keyword top-N → reciprocal rank fusion → CPU cross-encoder
 rerank of the best `rerank_candidates` → top-k above a score floor, each with a `path#heading` citation.
 
-Privacy: every document gets a privacy_tag (frontmatter, folder rules, keywords, secret/PII patterns). PRIVATE
+Privacy: every document gets a privacy_tag (frontmatter, folder/path rules, secret patterns). PRIVATE
 chunks are returned only to PRIVATE runs, which are pinned to local models (§5).
 """
 import json
@@ -113,10 +113,6 @@ def doc_privacy(path: str, meta: dict[str, Any], text: str, rules: dict[str, Any
         pre = str(pre).strip("/").lower()
         if pre and (low_path == pre or low_path.startswith(pre + "/")):
             return "PRIVATE", f"path {pre}/"
-    low = text.lower()
-    for kw in rules.get("private_keywords") or []:
-        if kw.lower() in low:
-            return "PRIVATE", f"keyword '{kw}'"
     for pat in BUILTIN_PATTERNS + _compile_extra(rules):
         if (pat.kind != "secret" and not pat.private) or pat.name in _DOC_HEURISTIC:
             continue  # plain PII / `key: value` heuristics are redacted on non-private searches instead

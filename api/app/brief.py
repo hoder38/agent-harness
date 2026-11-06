@@ -1,7 +1,7 @@
 """Morning brief (phase 11): weather, today's calendar, due todos, Inbox and yesterday's spend — built in code.
 
-No model sees the brief. Calendar and todo titles are PRIVATE, so:
-- the full brief goes to the private web thread `web:brief` (follow-up questions there stay local) and the Inbox;
+No model writes the brief. Calendar and todo titles are not PRIVATE (§6, 2026-11-05), so:
+- the full brief goes to the normal web thread `web:brief` (follow-up questions may use cloud models) and the Inbox;
 - LINE only gets the weather, the counts and the spend (same rule as todo reminders).
 """
 import logging
@@ -11,7 +11,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from . import config, db, gcal, inbox, state, todos, weather
+from . import config, db, gcal, inbox, todos, weather
 from .channels import line
 from .settings import get_settings
 
@@ -140,11 +140,9 @@ async def run(now: datetime | None = None) -> dict[str, Any]:
     full, notice = compose(day=day, weather_lines=weather_lines, events=events, overdue=overdue, due=due,
                            counts=counts, spend=spend, quiet=quiet)
     msg_id = f"brief-{day:%Y%m%d}"  # the same id replaces a brief re-run on the same day
-    r = state.get_redis()
-    await state.mark_thread_private(r, THREAD)
     await _write_thread(full, msg_id)
     await inbox.dismiss_bulk("brief")
-    await inbox.add("brief", f"☀️ 晨報 {day:%m/%d}", full, priority="low", private=True, thread_id=THREAD)
+    await inbox.add("brief", f"☀️ 晨報 {day:%m/%d}", full, priority="low", thread_id=THREAD)
     s = get_settings()
     if c.get("line", True) and s.line_owner_user_id and s.line_channel_access_token:
         try:

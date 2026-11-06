@@ -63,7 +63,7 @@ async def test_add_event_only_proposes_then_approval_creates_it(env):
     out = await cal.add_event.ainvoke({"title": "Dentist", "start": "2026-11-02T09:00"})
     assert "NOT been changed" in out and not g.calls
     item = fi.items[1]
-    assert item["kind"] == "approval" and item["private"] and item["detail"]["calendar"]["end"].startswith("2026-11-02T10:00")
+    assert item["kind"] == "approval" and not item.get("private") and item["detail"]["calendar"]["end"].startswith("2026-11-02T10:00")
     assert "Already waiting" in await cal.add_event.ainvoke({"title": "Dentist", "start": "2026-11-02T09:00"})
     assert len(fi.items) == 1
     res = await inbox_routes.answer_item(1, inbox_routes.AnswerBody(value="Approve"), None, "owner")
@@ -84,15 +84,14 @@ async def test_delete_event_is_a_proposal_and_bad_input_is_refused(env):
     assert g.calls == [("delete", "e9")]
 
 
-def test_calendar_tools_are_local_only_and_need_a_connected_grant(monkeypatch):
+def test_calendar_tools_need_a_connected_grant(monkeypatch):
     from app import config
 
     monkeypatch.setattr(config, "policy", lambda: {"calendar": {"enabled": True}})
     monkeypatch.setattr(gcal, "available", lambda: True)
-    assert "add_event" in {t.name for t in tools_for("assistant", local=True)}
-    assert "add_event" not in {t.name for t in tools_for("assistant", local=False)}
+    assert "add_event" in {t.name for t in tools_for("assistant")}
     monkeypatch.setattr(gcal, "available", lambda: False)
-    assert "add_event" not in {t.name for t in tools_for("assistant", local=True)}
+    assert "add_event" not in {t.name for t in tools_for("assistant")}
 
 
 def test_day_range_and_event_line():

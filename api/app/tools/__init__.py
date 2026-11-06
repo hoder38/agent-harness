@@ -29,9 +29,9 @@ KB_ROUTES = {"chat", "assistant"}
 TODO_ROUTES = {"assistant"}
 
 
-def tools_for(route: str, *, private: bool = False, local: bool = False) -> list:
+def tools_for(route: str, *, private: bool = False) -> list:
     tools = list(ROUTE_TOOLS.get(route, []))
-    if route in TODO_ROUTES and local:   # calendar content is PRIVATE: local models only
+    if route in TODO_ROUTES:   # cloud routes too (§6, 2026-11-05); writes are Inbox proposals
         from .. import config, gcal
 
         if (config.policy().get("calendar") or {}).get("enabled") and gcal.available():

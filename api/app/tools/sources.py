@@ -41,9 +41,9 @@ async def _ledger_put(key: str, value: dict, ttl_s: int = LEDGER_TTL_S) -> None:
 
 
 def query_blocked(query: str) -> str | None:
-    """Gate 0 on outgoing queries: secrets/PII or private keywords never leave the machine."""
+    """Gate 0 on outgoing queries: secrets/PII or private patterns never leave the machine."""
     g = gate0(Job(channel="event", user_id="-", thread_id="-", text=query, dedupe_key="-"), config.privacy_rules())
-    if g.findings or g.privacy_tag == "PRIVATE":
+    if g.findings or g.local_only or g.privacy_tag == "PRIVATE":
         return "query contains private or secret data"
     return None
 

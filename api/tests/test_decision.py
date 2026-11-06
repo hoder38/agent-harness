@@ -57,6 +57,15 @@ def test_private_gaming_background_defers(policy):
     assert out.route == "defer" and out.queue == "background"
 
 
+# 1b. private pattern/source in one message → local for that message, thread stays normal
+def test_local_only_message_beats_cloud_override_but_is_not_private(policy):
+    g = Gate0Result(text="hi", redacted_text="hi", local_only=True)
+    out = d(policy, j=job(override="cloud"), g=g, r=rr(tier="cloud_strong"))
+    assert out.model == "local" and not out.private
+    out = d(policy, g=Gate0Result(text="hi", redacted_text="hi", override="code", local_only=True))
+    assert out.route == "chat" and out.model == "local"
+
+
 # 3. confidence: ambiguous → clarify on a local model, no tier bump
 @pytest.mark.parametrize("conf", [0.3, 0.6])
 def test_ambiguous_clarifies_on_local_even_if_router_wants_cloud(policy, conf):

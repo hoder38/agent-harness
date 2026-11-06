@@ -192,7 +192,8 @@ async def test_queued_local_run_moves_to_cloud_when_gaming_started(redis, enq, c
 
 async def test_private_background_run_is_deferred_while_gaming(redis, enq, confs, llm):
     llm({})
-    res = await pipeline.submit(job("my bank 1234", "a", mode="background", source="finance"), enq)
+    await state.mark_thread_private(redis, "web:t")
+    res = await pipeline.submit(job("my bank 1234", "a", mode="background"), enq)
     await redis.set("gpu_state", "GAMING")
     assert (await worker.run_agent(CTX(), enq.calls[-1]["payload"]))["status"] == "deferred"
     assert res.run_id in await redis.hgetall("deferred")
@@ -343,7 +344,8 @@ async def test_private_answer_is_checked_locally_and_never_escalated(redis, enq,
     monkeypatch.setattr(worker.verify, "qwen_score", qwen)
     box = llm({"draft": "Wrong.", "extract_claims": {"claims": []}})
     ctx = {**CTX(), "redis": FakeArq()}
-    await pipeline.submit(job("my balance?", "a", source="finance"), enq)
+    await state.mark_thread_private(redis, "web:t")
+    await pipeline.submit(job("my balance?", "a"), enq)
     payload = enq.calls[-1]["payload"]
     assert payload["decision"]["private"]
     assert (await worker.run_agent(ctx, payload))["status"] == "done"

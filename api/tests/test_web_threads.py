@@ -25,3 +25,17 @@ def test_empty_reply_after_tool_shows_tool_result():
             {"role": "tool", "name": "add_todo", "content": "Added todo #1"}, {"role": "assistant", "content": ""}]
     _fill_empty_replies(msgs)
     assert msgs[1]["content"] == "" and msgs[3]["content"] == "Added todo #1"
+
+
+async def test_owner_marks_a_thread_private_one_way(redis):
+    from app import state
+    from app.routes.web import PrivateBody, set_thread_private
+
+    assert (await set_thread_private("w1", PrivateBody(private=False), "owner"))["private"] is False
+    assert (await set_thread_private("w1", PrivateBody(private=True), "owner"))["private"] is True
+    assert await state.is_thread_private(redis, "web:w1")
+    with pytest.raises(HTTPException) as e:
+        await set_thread_private("w1", PrivateBody(private=False), "owner")
+    assert e.value.status_code == 409
+    with pytest.raises(HTTPException):
+        await set_thread_private("line", PrivateBody(private=True), "owner")

@@ -91,7 +91,7 @@ async def _remember(job: Job, fact: str) -> str:
     g0 = gate0(Job(**{**job.model_dump(), "text": fact}), config.privacy_rules(),
                thread_private=await state.is_thread_private(r, job.thread_id),
              channel=job.channel)
-    private = g0.privacy_tag == "PRIVATE" or bool(g0.findings)
+    private = g0.privacy_tag == "PRIVATE" or g0.local_only or bool(g0.findings)
     await memory.remember("profile", fact, private=private, kind="explicit",
                           source={"thread_id": job.thread_id, "channel": job.channel})
     await db.audit("memory", "remember", {"private": private, "channel": job.channel})
@@ -112,7 +112,7 @@ async def _note(job: Job, text: str) -> str:
     r = state.get_redis()
     g0 = gate0(Job(**{**job.model_dump(), "text": text}), config.privacy_rules(),
                thread_private=await state.is_thread_private(r, job.thread_id), channel=job.channel)
-    private = g0.privacy_tag == "PRIVATE" or bool(g0.findings)
+    private = g0.privacy_tag == "PRIVATE" or g0.local_only or bool(g0.findings)
     try:
         rel = vault_writer.capture(text, source=job.channel, private=private)
     except vault_writer.VaultWriteError as e:
@@ -176,9 +176,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     if g0.privacy_tag is None:
         g1 = await gate1(g0.text)  # deferred stub → None
         g0.privacy_tag = "PRIVATE" if g1 else "NORMAL"
-    private = g0.privacy_tag == "PRIVATE"
-    if private:
-        await state.mark_thread_private(r, job.thread_id)
+    private = g0.privacy_tag == "PRIVATE"   # owner-marked thread only (§6); no content-based stickiness
     # Short form (attachments cut down) for the router, thread context and the decision log.
     gr = g0 if router_text is None else gate0(Job(**{**job.model_dump(), "text": router_text}),
                                               config.privacy_rules(), thread_private=private, channel=job.channel)
@@ -266,7 +264,7 @@ async def submit(job: Job, enqueue: Enqueue, *, delivery: dict[str, Any] | None 
     )
 
     # Non-private threads may later be continued on a cloud model, so they only ever store redacted
-    # text. PRIVATE threads are pinned to local models (sticky), so they keep the original.
+    # text (also for a local-only message). Owner-marked PRIVATE threads stay on local models and keep the original.
     model_text = g0.text if private else g0.redacted_text
     if delivery and decision.queue != "interactive":
         # The channel acks immediately with the reply token; the result is pushed later.

@@ -60,7 +60,7 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `attachment`, `
 - `done.grounding` = `{verdict, citations, unverified, budget}`.
 
 **Message prefixes**
-- Routing overrides: `/local`, `/cloud`, `/code` (coding sandbox, see Coding below). Private content is detected automatically (PII/secrets/keywords) and stays local.
+- Routing overrides: `/local`, `/cloud`, `/code` (coding sandbox, see Coding below). Secrets and PII are redacted before any cloud call. A chat is PRIVATE (local models only) only when you mark it with the 🔓 button in the web chat (one-way; start a new chat to use cloud models again).
 - Owner commands: `/stop cloud|all`, `/resume`, `/status`, `/help`. Any other `/word` replies with the command list.
 - `/skip` (web or LINE) skips an open clarifying question; the answer then states its assumptions.
 - `/remember <fact>` saves a long-term memory (private if the thread or the fact is private).
@@ -105,7 +105,7 @@ SSE event types: `decision`, `token`, `reset`, `tool`, `status`, `attachment`, `
 ## Knowledge base & memory (phase 10, ARCHITECTURE.md §10)
 
 - **Docs folder:** Markdown/text files under `DOCS_DIR` (default `~/agent-docs`, mounted read-only at `/docs`) are indexed every 5 minutes.
-  - A file is PRIVATE when its frontmatter has `privacy: private`, it is under a `private/` folder, or it contains a private keyword or secret.
+  - A file is PRIVATE when its frontmatter has `privacy: private`, it is under a `private/` folder or a `private_paths` prefix, or it contains a secret.
   - Answers cite these files as `[n] 📄 title — path#heading`.
 - **Reranker:** the `reranker` service runs `bge-reranker-v2-m3` on CPU and takes about 4 s per query. If it is down, search falls back to RRF.
 - **Memories:**
@@ -247,4 +247,4 @@ Media-worker tests: `docker compose --profile test build media-test && docker co
 
 One-time setup on the host: `python3 host/google_auth.py` (reads `GOOGLE_ID`/`GOOGLE_SECRET` from nodeReact's `.env`, asks you to paste the final redirect URL, writes `~/.config/harness/google/calendar.json`, mounted read-only at `/google`). Scope is `calendar.events` only, a separate grant from nodeReact's Drive token. Enable with `calendar.enabled` in `config/policy.yaml`.
 
-The assistant route (local models only; calendar words mark the message PRIVATE) gets `list_events`, `add_event`, `delete_event`. Add and delete never touch Google directly: they create an approval item in the Inbox (plus a content-free LINE push), and the change is made when you press Approve.
+The assistant route (local or cloud models) gets `list_events`, `add_event`, `delete_event`. Add and delete never touch Google directly: they create an approval item in the Inbox (plus a content-free LINE push), and the change is made when you press Approve.

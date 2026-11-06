@@ -281,7 +281,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns)
             answer_nodes = {"compose"}
         else:
-            tools = tools_for(route, private=decision.private, local=model in LOCAL_MODELS)
+            tools = tools_for(route, private=decision.private)
             owner_text = media.strip_blocks(payload["text"])   # = the text unless files are attached
             if owner_text != payload["text"].strip():
                 tools = for_attachments(tools, owner_text)

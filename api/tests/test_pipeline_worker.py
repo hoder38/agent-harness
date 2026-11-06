@@ -64,10 +64,20 @@ async def test_payload_text_is_redacted_and_decision_logged(redis, enq, no_db):
     assert "sk-abc" not in json.dumps(logged, default=str)
 
 
-async def test_private_thread_is_sticky_and_local(redis, enq):
-    await pipeline.submit(job("check this", key="a", source="finance"), enq)
+async def test_private_source_is_local_for_that_message_only(redis, enq):
+    res = await pipeline.submit(job("check me@example.com", key="a", source="finance"), enq)
+    assert res.decision.model == "local" and not res.decision.private
+    assert "me@example.com" not in enq.calls[0]["payload"]["text"]   # history stays safe for later cloud turns
+    assert not await state.is_thread_private(redis, "web:t")
     res = await pipeline.submit(job("and now?", key="b"), enq)
+    assert not res.decision.private and res.decision.model == "cloud_fast"
+
+
+async def test_owner_marked_thread_is_private_and_keeps_original_text(redis, enq):
+    await state.mark_thread_private(redis, "web:t")
+    res = await pipeline.submit(job("mail me@example.com", key="a"), enq)
     assert res.decision.private and res.decision.model == "local"
+    assert "me@example.com" in enq.calls[0]["payload"]["text"]
 
 
 # ---------------------------------------------------------------- LINE
@@ -234,7 +244,8 @@ async def test_clarify_rounds_are_capped(redis, enq, router_seq):
 async def test_private_clarify_question_stays_out_of_redacted_routing_text(redis, enq, router_seq):
     seen, confs = router_seq
     confs += [0.4, 0.95]
-    await pipeline.submit(job("check this", key="a", source="finance"), enq)
+    await state.mark_thread_private(redis, "web:t")
+    await pipeline.submit(job("check this", key="a"), enq)
     await state.set_clarify_question(redis, "web:t", "Which account, 1234?")
     await pipeline.submit(job("savings", key="b"), enq)
     assert "1234" not in seen[1]["redacted_text"] and "1234" in seen[1]["text"]

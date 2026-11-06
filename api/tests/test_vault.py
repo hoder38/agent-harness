@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import config, vault_writer as vw
+from app import vault_writer as vw
 from app.rag import store, vault
 from app.settings import get_settings
 
@@ -84,8 +84,7 @@ def test_capture_and_daily_note(vdir):
     assert vw.capture("買濾心", when=when).endswith(" 2.md")
     meta, body = vault.chunking.split_frontmatter((vdir / rel).read_text())
     assert meta["privacy"] == "normal" and meta["tags"] == ["inbox"] and body.strip().startswith("買濾心")
-    kw = (config.privacy_rules().get("private_keywords") or ["x"])[0]
-    secret = vw.capture(f"note about {kw}", when=when)
+    secret = vw.capture("note about token ghp_" + "a" * 36, when=when)
     assert "privacy: private" in (vdir / secret).read_text()
 
     vw.append_daily("first", when=when)
@@ -95,7 +94,7 @@ def test_capture_and_daily_note(vdir):
     vw.append_daily("second", when=when.replace(hour=10))
     vw.write_daily_summary(when, "## Summary\nupdated")
     text = p.read_text()
-    assert "privacy: private" in text and "day went well" not in text and text.count(vw.SUMMARY_START) == 1
+    assert "privacy: normal" in text and "day went well" not in text and text.count(vw.SUMMARY_START) == 1
     log = text.split("## Log", 1)[1]
     assert log.index("09:05 first") < log.index("10:05 second") < log.index("## Owner")
     assert "mine" in text and "updated" in text

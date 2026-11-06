@@ -44,6 +44,7 @@ class Gate0Result(BaseModel):
     override: Override | None = None
     findings: list[str] = []        # names of matched secret/PII patterns
     privacy_tag: Literal["PRIVATE", "NORMAL"] | None = None  # None = inconclusive
+    local_only: bool = False        # private pattern/source hit: this message only runs on a local model
     reasons: list[str] = []
 
 

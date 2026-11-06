@@ -191,7 +191,7 @@ def append_daily(entry: str, *, private: bool = False, when: datetime | None = N
     return rel
 
 
-def write_daily_summary(day: datetime, summary: str, *, private: bool = True) -> str:
+def write_daily_summary(day: datetime, summary: str, *, private: bool = False) -> str:
     """Replace the harness summary block of a day's note (created when missing); the Log and owner edits stay."""
     rel = daily_rel(day)
     p = writable_path(rel)

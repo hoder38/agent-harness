@@ -228,6 +228,29 @@ async def hide_thread(tid: str, owner: str = Depends(require_owner)):
     return {"ok": True}
 
 
+class PrivateBody(BaseModel):
+    private: bool
+
+
+@router.put("/threads/{tid}/private")
+async def set_thread_private(tid: str, body: PrivateBody, owner: str = Depends(require_owner)):
+    """Owner marks a thread PRIVATE (local models only, §6). One-way: a PRIVATE thread keeps unredacted text in its
+    history, so it can never be continued on a cloud model."""
+    if tid == LINE_TID:
+        raise HTTPException(400, "the LINE thread cannot be private")
+    thread_id = _thread_id(tid)
+    r = state.get_redis()
+    was = await state.is_thread_private(r, thread_id)
+    if not body.private:
+        if was:
+            raise HTTPException(409, "a private thread stays private; start a new thread instead")
+        return {"thread_id": thread_id, "private": False}
+    if not was:
+        await state.mark_thread_private(r, thread_id)
+        await db.audit("privacy", "thread_private", {"thread_id": thread_id})
+    return {"thread_id": thread_id, "private": True}
+
+
 @router.get("/threads/{tid}")
 async def get_thread(tid: str, request: Request, owner: str = Depends(require_owner)):
     thread_id = _thread_id(tid)

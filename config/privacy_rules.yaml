@@ -1,29 +1,22 @@
-# Gate 0 source tagging. Content from any of these sources is PRIVATE (local models only).
+# PRIVATE is the owner's choice only (§6, 2026-11-05): /local, a thread marked private in nodeReact, vault notes with
+# frontmatter `privacy: private`, private_doc_dirs and private_paths. Nothing makes a thread PRIVATE automatically.
+
+# Gate 0 source tagging. A message from any of these sources runs on a local model (that message only).
 private_sources:
   - mail
-  - calendar
   - finance
   - private_dir        # ~/private
-  - personal_notes
   - vault_private      # vault notes with frontmatter privacy: private
 
 # Extra regexes (added to the built-in secret/PII patterns in app/gates/gate0.py).
-# kind: secret | pii   private: true marks the whole message PRIVATE instead of just redacting.
+# kind: secret | pii   private: true also keeps that message on a local model (the thread stays normal).
 extra_patterns: []
 #  - { name: tw_bank_account, kind: pii, regex: '\b\d{3}-\d{2}-\d{6,8}\b', private: true }
-
-# Keywords that mark a message PRIVATE outright (case-insensitive substring match).
-private_keywords:     # calendar questions must stay on local models (the calendar tools are local-only)
-  - "行事曆"
-  - "日曆"
-  - "calendar"
-  - "行程"
-#  - "my salary"
 
 # Docs-folder subfolders (any level) whose documents are PRIVATE (RAG §10). Frontmatter `privacy: private` also works.
 private_doc_dirs:
   - private
 
 # Vault/docs path prefixes (from the root) whose notes are PRIVATE (§10a), e.g. "Areas/Health", "Journal".
-# The daily notes (AI/Daily) are always written with `privacy: private`.
+# The daily notes (AI/Daily) are private only when that day includes a PRIVATE thread.
 private_paths: []

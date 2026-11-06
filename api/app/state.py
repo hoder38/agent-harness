@@ -47,7 +47,7 @@ async def dedupe(r: aioredis.Redis, key: str, ttl_s: int = 86400) -> bool:
     return bool(await r.set(f"dedupe:{key}", "1", nx=True, ex=ttl_s))
 
 
-# ---------------------------------------------------------------- privacy stickiness
+# ---------------------------------------------------------------- owner-marked PRIVATE threads (§6)
 async def is_thread_private(r: aioredis.Redis, thread_id: str) -> bool:
     return bool(await r.exists(f"thread_private:{thread_id}"))
 

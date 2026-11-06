@@ -1,8 +1,7 @@
 """Calendar tools for the assistant route (§10). Reading is direct; writing is only ever a proposal.
 
-add_event / delete_event never touch Google: they put an approval item in the Inbox (private), and the change is made
-only when the owner approves it there (see `execute`, called by the Inbox answer route). Local models only: calendar
-content is PRIVATE (config/privacy_rules.yaml), so tools_for hides these from cloud models.
+add_event / delete_event never touch Google: they put an approval item in the Inbox, and the change is made only when
+the owner approves it there (see `execute`, called by the Inbox answer route). Offered to cloud models too (§6).
 """
 import logging
 from datetime import timedelta
@@ -35,14 +34,14 @@ async def _propose(action: str, title: str, body: str, data: dict[str, Any]) -> 
     for it in await inbox.list_("open", "approval", 100):   # a small local model may repeat the same call
         if (it.get("detail") or {}).get("calendar") == {"action": action, **data}:
             return f"Already waiting for approval in the Inbox (item #{it['id']}). Nothing has changed yet."
-    item = await inbox.add("approval", title, body, priority="high", private=True,
+    item = await inbox.add("approval", title, body, priority="high",
                            detail={"options": [], "calendar": {"action": action, **data}})
     if item is None:
         return "Could not create the approval item; nothing was changed."
     s = get_settings()
     if s.line_owner_user_id and s.line_channel_access_token:
         try:
-            await line.push(s.line_owner_user_id, "📥 A private calendar change is waiting for your approval in the Inbox.")
+            await line.push(s.line_owner_user_id, "📥 A calendar change is waiting for your approval in the Inbox.")
         except Exception:
             log.exception("LINE calendar push failed")
     return (f"Proposed (Inbox item #{item}). The calendar has NOT been changed yet: the owner must approve it in the "

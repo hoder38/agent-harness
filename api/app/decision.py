@@ -47,6 +47,18 @@ def decide(
         locked.add("route")
         reasons.append("1: /code override → coding")
 
+    # 1b. private pattern/source in this message → local model for this message only (beats /cloud); its text is
+    # redacted and it gets no private data, so later cloud turns cannot see anything private (§6)
+    if gate0.local_only and not private:
+        model = "local"
+        locked.add("model")
+        if route == "coding":
+            route = "chat"
+            locked.add("route")
+            reasons.append("1b: private pattern/source → local, chat (coding uses cloud Copilot)")
+        else:
+            reasons.append("1b: private pattern/source → local (this message only)")
+
     # 2. PRIVATE → local only (hard constraint, beats /cloud)
     if private:
         locked.add("model")

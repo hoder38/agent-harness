@@ -1,7 +1,8 @@
 """Nightly daily note (§10a): AI/Daily/YYYY-MM-DD.md gets a summary of the day, built in code (no model call):
 conversation and Copilot episodes updated that day, todos completed, notes captured into Inbox/.
 
-Always `privacy: private` (episodes and todo titles are PRIVATE). Only the block between the harness:summary
+`privacy: private` only when one of that day's episodes is private (a PRIVATE thread); otherwise normal, so cloud
+models may read it (§6, 2026-11-05). A note once private stays private. Only the block between the harness:summary
 markers is rewritten, so the `## Log` lines and anything the owner adds stay. Schedule kind `vault_daily`.
 """
 import re
@@ -59,8 +60,9 @@ async def run(day: datetime | None = None) -> str:
     done = [t for t in await todos.list_("done", 500) if _on(t["updated_at"], day)]
     eps.sort(key=lambda e: e["updated_at"])
     cod.sort(key=lambda e: e["updated_at"])
+    private = any(e.get("privacy") == "private" for e in eps + cod)
     return vw.write_daily_summary(day, build(day, episodes=eps, coding=cod, done=done, captured=_captured(day)),
-                                  private=True)
+                                  private=private)
 
 
 async def run_for(date: str) -> str:

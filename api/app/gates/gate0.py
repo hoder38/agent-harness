@@ -89,31 +89,24 @@ def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool
         reasons.append(f"override=/{override}")
 
     redacted, findings, private_hits = redact(text, rules)
-    private = bool(private_hits)
-    reasons += [f"pattern {n} marks PRIVATE" for n in private_hits]
+    # A `private: true` pattern or a private source keeps this message on a local model; it does not make the
+    # thread PRIVATE (§6, 2026-11-05). Only the owner marks a thread PRIVATE.
+    local_only = bool(private_hits)
+    reasons += [f"pattern {n} → local only" for n in private_hits]
     if findings:
         reasons.append("redacted: " + ",".join(findings))
 
-    # LINE has no private tools or content, so only secret patterns lock it.
-    topical = channel != "line"
     private_sources = set(rules.get("private_sources") or [])
-    if topical and job.source and job.source in private_sources:
-        private = True
-        reasons.append(f"source={job.source} is PRIVATE")
+    if channel != "line" and job.source and job.source in private_sources:
+        local_only = True
+        reasons.append(f"source={job.source} → local only")
 
-    lowered = text.lower()
-    for kw in (rules.get("private_keywords") or []) if topical else []:
-        if kw.lower() in lowered:
-            private = True
-            reasons.append(f"keyword '{kw}' is PRIVATE")
-            break
-
+    private = thread_private
     if thread_private:
-        private = True
-        reasons.append("thread already contains PRIVATE content")
+        reasons.append("thread marked PRIVATE by the owner")
 
     if channel == "line":
-        private = False  # LINE is never PRIVATE; secrets are still redacted above
+        private = local_only = False  # LINE is never PRIVATE; secrets are still redacted above
 
     return Gate0Result(
         text=text,
@@ -121,5 +114,6 @@ def gate0(job: Job, rules: dict[str, Any] | None = None, *, thread_private: bool
         override=override,
         findings=findings,
         privacy_tag="PRIVATE" if private else None,
+        local_only=local_only and not private,
         reasons=reasons,
     )

@@ -66,10 +66,11 @@ def test_rrf_and_select_hits():
 
 
 def test_document_privacy():
-    rules = {"private_doc_dirs": ["private"], "private_keywords": ["salary"]}
+    rules = {"private_doc_dirs": ["private"], "private_paths": ["Areas/Health"]}
     assert store.doc_privacy("x.md", {"privacy": "private"}, "hi", rules)[0] == "PRIVATE"
     assert store.doc_privacy("notes/Private/x.md", {}, "hi", rules)[0] == "PRIVATE"
-    assert store.doc_privacy("x.md", {}, "My Salary is", rules)[0] == "PRIVATE"
+    assert store.doc_privacy("Areas/Health/x.md", {}, "hi", rules)[0] == "PRIVATE"
+    assert store.doc_privacy("x.md", {}, "明天的行程和行事曆", rules)[0] == "NORMAL"
     assert store.doc_privacy("x.md", {}, "token ghp_" + "a" * 36, rules)[0] == "PRIVATE"
     # contact details and config examples are redacted on non-private searches, not a reason to hide the doc
     assert store.doc_privacy("x.md", {}, "mail me@example.com\napi_key: os.environ/OPENAI_API_KEY", rules)[0] == "NORMAL"
