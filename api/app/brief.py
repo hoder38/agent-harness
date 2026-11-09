@@ -12,8 +12,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from . import config, db, gcal, inbox, todos, weather
-from .channels import line
-from .settings import get_settings
+from .channels.notify import notify
 
 log = logging.getLogger(__name__)
 
@@ -143,10 +142,6 @@ async def run(now: datetime | None = None) -> dict[str, Any]:
     await _write_thread(full, msg_id)
     await inbox.dismiss_bulk("brief")
     await inbox.add("brief", f"☀️ 晨報 {day:%m/%d}", full, priority="low", thread_id=THREAD)
-    s = get_settings()
-    if c.get("line", True) and s.line_owner_user_id and s.line_channel_access_token:
-        try:
-            await line.push(s.line_owner_user_id, notice)
-        except Exception:
-            log.exception("brief: LINE push failed")
+    if c.get("line", True):
+        await notify(notice)
     return {"events": None if events is None else len(events), "due": len(due), "overdue": len(overdue)}

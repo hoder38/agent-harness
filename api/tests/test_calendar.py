@@ -54,7 +54,9 @@ def env(monkeypatch):
         monkeypatch.setattr(inbox, n, getattr(fi, n))
     for n in ("insert_event", "delete_event", "get_event"):
         monkeypatch.setattr(gcal, n, getattr(g, n))
-    monkeypatch.setattr(cal.get_settings(), "line_owner_user_id", "")
+    async def no_notify(text):
+        return False
+    monkeypatch.setattr(cal, "notify", no_notify)
     return fi, g
 
 

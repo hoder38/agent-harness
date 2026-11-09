@@ -15,8 +15,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from . import config, db, state
-from .channels import line
-from .settings import get_settings
+from .channels.notify import notify
 
 log = logging.getLogger(__name__)
 
@@ -154,14 +153,8 @@ async def notify_question(*, run_id: str, thread_id: str, channel: str, q: dict[
                              "coding" if coding else "grounded", "ttl_s": ttl_s, "channel": channel})
     if item is None or channel == "line":
         return
-    s = get_settings()
-    if s.line_owner_user_id and s.line_channel_access_token:
-        text = ("📥 A private task is waiting for you in the Inbox." if private
-                else f"📥 {title}\nOpen the Inbox on the web to answer.")
-        try:
-            await line.push(s.line_owner_user_id, text)
-        except Exception:
-            log.exception("LINE inbox push failed")
+    await notify("📥 A private task is waiting for you in the Inbox." if private
+                 else f"📥 {title}\nOpen the Inbox on the web to answer.")
 
 
 async def memory_written(op: str, namespace: str, key: str, text: str = "", *, private: bool = False,

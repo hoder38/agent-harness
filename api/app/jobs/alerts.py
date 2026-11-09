@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from .. import config, db, inbox, state
-from ..channels import line
+from ..channels.notify import notify
 from ..settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -30,14 +30,7 @@ async def send_alert(key: str, message: str, *, dedupe_s: int | None = None) -> 
         log.warning("ALERT (quiet) %s: %s", key, message)
         await db.log_alert(key, message, False)
         return True
-    s = get_settings()
-    delivered = False
-    if s.line_owner_user_id and s.line_channel_access_token:
-        try:
-            await line.push(s.line_owner_user_id, f"⚠️ {message}")
-            delivered = True
-        except Exception:
-            log.exception("LINE alert push failed")
+    delivered = await notify(f"⚠️ {message}")
     log.warning("ALERT %s: %s", key, message)
     await db.log_alert(key, message, delivered)
     await inbox.add("alert", message, priority="normal", detail={"key": key, "line": delivered})

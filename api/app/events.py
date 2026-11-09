@@ -14,7 +14,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from . import config, db, inbox
-from .channels import line
+from .channels.notify import notify
 from .settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -55,10 +55,6 @@ async def record(source: str, event_id: str, payload: Any, c: dict[str, Any]) ->
     await inbox.add("event", title, json.dumps(payload, ensure_ascii=False, indent=1)[:6000],
                     priority=c.get("priority", "normal"), private=private,
                     detail={"source": source, "event_id": event_id})
-    s = get_settings()
-    if c.get("line") and s.line_owner_user_id and s.line_channel_access_token:
-        try:
-            await line.push(s.line_owner_user_id, f"🔔 {source} event" if private else f"🔔 {title}")
-        except Exception:
-            log.exception("event LINE push failed")
+    if c.get("line"):
+        await notify(f"🔔 {source} event" if private else f"🔔 {title}")
     return True

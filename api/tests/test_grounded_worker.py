@@ -158,6 +158,23 @@ async def test_line_gets_the_question_with_options(redis, enq, confs, llm, monke
     assert text.startswith("哪一支手機？\n1. iPhone\n2. Pixel") and "/skip" in text
 
 
+async def test_line_turn_past_the_deadline_stops_and_says_too_late(redis, enq, confs, llm, monkeypatch):
+    import time
+    sent = []
+
+    async def deliver(to, text, token, ts, ttl):
+        sent.append((text, token))
+        return "reply"
+
+    monkeypatch.setattr(worker.line, "deliver", deliver)
+    llm({"assess_ambiguity": {"ambiguous": False}})
+    await pipeline.submit(job("今天天氣", "a", channel="line", thread_id="line:U"), enq,
+                          delivery={"line_user_id": "U", "reply_token": "R", "reply_ts": time.time() - 40})
+    assert (await worker.run_agent(CTX(), enq.calls[-1]["payload"]))["status"] == "too_late"
+    (text, token), = sent
+    assert token == "R" and text.startswith("⌛")
+
+
 async def test_cancel_drops_the_pending_question_and_resume_endpoint_validates(redis, enq, confs, llm):
     from types import SimpleNamespace
 

@@ -72,10 +72,22 @@ async def _deliver_line(job: Job, decision: Decision, delivery: dict[str, Any], 
         text = notice or ex.get("private_line_notice", "🔒 Private answer: open the web app.")
     text = text[: int(ex.get("line_max_chars", 4500))]
     try:
-        await line.deliver(to, text, delivery.get("reply_token"), delivery.get("reply_ts"),
-                           float(ex.get("line_reply_token_ttl_s", 50)))
+        how = await line.deliver(to, text, delivery.get("reply_token"), delivery.get("reply_ts"),
+                                 float(ex.get("line_reply_token_ttl_s", 50)))
     except Exception:
         log.exception("LINE delivery failed")
+        return
+    if how == "dropped":
+        from . import alerts
+        await alerts.send_alert(f"line:dropped:{job.thread_id}", "A LINE answer missed the reply window and was "
+                                "dropped (no push).")
+
+
+def _line_budget(job: Job, delivery: dict[str, Any], ex: dict[str, Any]) -> float | None:
+    """Seconds left for a LINE turn to answer inside the reply window (§19); None = no deadline."""
+    if job.channel != "line" or not delivery.get("reply_token") or not delivery.get("reply_ts"):
+        return None
+    return float(delivery["reply_ts"]) + float(ex.get("line_deadline_s", 35)) - time.time()
 
 
 def _use_grounded(pol: dict[str, Any]) -> bool:
@@ -264,6 +276,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     started = time.monotonic()
     required: str | None = None
     escalate: dict[str, Any] = payload.get("escalate") or {}
+    too_late = False
+    deadline = None
     try:
         llm = make_llm(model, ks)
         max_turns = int(ex.get("max_history_turns", 20))
@@ -325,7 +339,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         last_check = 0.0
         stream_id = None
         echo = ""  # "我理解為：…" line from the grounded compose node, sent before each (re)written answer
-        async with sem:
+        async with asyncio.timeout(_line_budget(job, delivery, ex)) as deadline, sem:
             async for mode, data in graph.astream(inp, run_cfg, stream_mode=["messages", "updates", "custom"]):
                 now = time.monotonic()
                 if now - last_check > CANCEL_POLL_S:
@@ -374,6 +388,11 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
             await state.emit(r, run_id, "status", {"status": "retrying", "attempt": tries + 1, "error": str(e)[:200]})
             raise Retry(defer=2 ** tries) from e
         return await _fail(r, run_id, job, decision, delivery, pol, e)
+    except TimeoutError as e:
+        if deadline is None or not deadline.expired():
+            log.exception("run %s failed", run_id)
+            return await _fail(r, run_id, job, decision, delivery, pol, e)
+        too_late = True  # LINE reply window: stop and say so, in every mode (owner's choice 2026-11-09)
     except Exception as e:
         log.exception("run %s failed", run_id)
         return await _fail(r, run_id, job, decision, delivery, pol, e)
@@ -385,6 +404,15 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
         await state.set_run_meta(r, run_id, status="cancelled")
         await db.update_outcome(run_id, {"status": "cancelled", "usage": usage}, cost)
         return {"status": "cancelled"}
+
+    if too_late:
+        text = str(ex.get("line_too_late_text") or "⌛ Too slow for the LINE reply window. Ask again or use the web.")
+        await state.emit(r, run_id, "error", {"message": "LINE reply window missed"})
+        await state.set_run_meta(r, run_id, status="error")
+        await db.update_outcome(run_id, {"status": "too_late", "usage": usage, "model": model,
+                                         "ms": int((time.monotonic() - started) * 1000)}, cost)
+        await _deliver_line(job, decision, delivery, text, pol, text)
+        return {"status": "too_late"}
 
     if gaming_stop:
         alt = _gaming_model(decision, ks)
@@ -513,6 +541,7 @@ async def _verify(r, run_id: str, payload: dict[str, Any], job: Job, decision: D
         return {"verify": out}
     nxt = verify.next_model(model, private=decision.private, killswitch=ks)
     blocked = ("max escalations" if len(history) - 1 >= int(c.get("max_escalations", 2)) else
+               "LINE reply window" if job.channel == "line" else
                "no higher tier" if nxt is None else
                "turn wrote data" if verify.wrote_something(messages) else
                "no start checkpoint" if not meta.get("verify_start") else None)

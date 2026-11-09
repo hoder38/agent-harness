@@ -30,6 +30,8 @@ x-app-env: &app-env
   LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET:-}
   LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
   LINE_OWNER_USER_ID: ${LINE_OWNER_USER_ID:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}       # §19 proactive notices (send-only)
+  TELEGRAM_OWNER_CHAT_ID: ${TELEGRAM_OWNER_CHAT_ID:-}
   EVENT_SECRETS: ${EVENT_SECRETS:-{}}               # phase 11: JSON {"source": "hmac secret"}
   DOCKER_HOST: http://socket-proxy-ro:2375
   POLICY_PATH: /config/policy.yaml

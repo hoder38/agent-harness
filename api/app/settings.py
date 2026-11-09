@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     line_api_base: str = "https://api.line.me"
     line_data_api_base: str = "https://api-data.line.me"   # message content (images, audio, files)
 
+    telegram_bot_token: str = ""                       # §19 proactive notices (send-only)
+    telegram_owner_chat_id: str = ""
+    telegram_api_base: str = "https://api.telegram.org"
+
     docker_host: str = "http://socket-proxy-ro:2375"
     ollama_url: str = "http://ollama:11434"            # gpu-governor: /api/ps, unload on GAMING; RAG embeddings
     reranker_url: str = ""                             # §10 CPU cross-encoder; empty = RRF order only

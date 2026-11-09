@@ -153,6 +153,8 @@ executor:
   max_history_turns: 20          # safety cap on verbatim user turns in the model context (see history:)
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry
+  line_deadline_s: 35            # §19: a LINE turn not done by then stops and replies line_too_late_text (all models)
+  line_too_late_text: "⌛ 來不及在 LINE 回覆時限內答完,請稍後再問,或到網頁問。"
   private_line_notice: "🔒 The answer contains private data. Open the web app to read it."
 
 # Concise mode (2026-11-09, for speed: output tokens are ~80% of local answer time, ~16 ms/token): grounded compose
@@ -248,7 +250,7 @@ gpu_governor:                # phase 4 (§11): app/governor.py, compose service 
 alerts:
   dedupe_s: 3600
   queue_age_s: 300
-  quiet_prefixes: ["queue:"]   # logged only, listed in the next morning brief (no LINE push / Inbox item)
+  quiet_prefixes: ["queue:", "line:"]   # logged only, listed in the next morning brief (no LINE push / Inbox item)
 
 rag:                         # phase 10 (§10): app/rag/, docs folder DOCS_DIR -> /docs, reranker service
   enabled: true

@@ -10,8 +10,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from .. import db, gcal, inbox, todos
-from ..channels import line
-from ..settings import get_settings
+from ..channels.notify import notify
 
 log = logging.getLogger(__name__)
 
@@ -38,12 +37,7 @@ async def _propose(action: str, title: str, body: str, data: dict[str, Any]) -> 
                            detail={"options": [], "calendar": {"action": action, **data}})
     if item is None:
         return "Could not create the approval item; nothing was changed."
-    s = get_settings()
-    if s.line_owner_user_id and s.line_channel_access_token:
-        try:
-            await line.push(s.line_owner_user_id, "📥 A calendar change is waiting for your approval in the Inbox.")
-        except Exception:
-            log.exception("LINE calendar push failed")
+    await notify("📥 A calendar change is waiting for your approval in the Inbox.")
     return (f"Proposed (Inbox item #{item}). The calendar has NOT been changed yet: the owner must approve it in the "
             "Inbox. Tell the owner that.")
 

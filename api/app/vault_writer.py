@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from . import config, db, inbox
-from .channels import line
+from .channels.notify import notify
 from .rag import chunking
 from .rag.vault import is_note_path, safe_rel
 from .settings import get_settings
@@ -267,12 +267,8 @@ async def propose_edit(path: str, old: str, new: str, *, reason: str = "", priva
     if item is None:
         return "Could not create the approval item; the note was not changed."
     await db.audit("vault", "propose_edit", {"path": rel})
-    s = get_settings()
-    if s.line_owner_user_id and s.line_channel_access_token and cfg().get("notify_line", True):
-        try:
-            await line.push(s.line_owner_user_id, "📥 A note edit is waiting for your approval in the Inbox.")
-        except Exception:
-            log.exception("LINE vault push failed")
+    if cfg().get("notify_line", True):
+        await notify("📥 A note edit is waiting for your approval in the Inbox.")
     return (f"Proposed (Inbox item #{item}). {rel} has NOT been changed yet: only Inbox/ and AI/ are written "
             "directly; the owner must approve this edit in the Inbox. Tell the owner that.")
 

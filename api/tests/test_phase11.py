@@ -150,7 +150,11 @@ async def test_quiet_alert_is_logged_not_pushed(redis, monkeypatch):
 
     pushed, logged, added = [], [], []
     monkeypatch.setattr(config, "policy", lambda: {"alerts": {"quiet_prefixes": ["queue:"]}})
-    monkeypatch.setattr(alerts.line, "push", lambda *a: pushed.append(a))
+
+    async def notify(text):
+        pushed.append(text)
+        return True
+    monkeypatch.setattr(alerts, "notify", notify)
     monkeypatch.setattr(alerts.inbox, "add", lambda *a, **k: added.append(a))
 
     async def log_alert(key, message, delivered):

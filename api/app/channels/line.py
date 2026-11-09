@@ -55,15 +55,20 @@ async def push(to: str, text: str) -> None:
 
 
 async def deliver(to: str, text: str, reply_token: str | None, reply_ts: float | None, ttl_s: float) -> str:
-    """Use the reply token while fresh; otherwise (or on failure) push. Returns 'reply' or 'push'."""
+    """Use the reply token while fresh. A missed window goes to Telegram if configured, else is dropped: LINE push is
+    never used for answers (§19, push counts against the monthly quota). Returns 'reply', 'telegram' or 'dropped'."""
+    from . import telegram
     if reply_token and reply_ts and time.time() - reply_ts < ttl_s:
         try:
             await reply(reply_token, text)
             return "reply"
         except Exception as e:  # expired / already used
-            log.info("LINE reply failed (%s); falling back to push", e)
-    await push(to, text)
-    return "push"
+            log.info("LINE reply failed (%s); falling back", e)
+    if telegram.configured():
+        await telegram.send(text)
+        return "telegram"
+    log.warning("LINE answer dropped: reply window missed and Telegram not configured")
+    return "dropped"
 
 
 async def content(message_id: str, max_bytes: int, *, wait_s: float = 60) -> AsyncIterator[bytes]:

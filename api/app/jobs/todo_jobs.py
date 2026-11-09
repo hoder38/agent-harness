@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import config, inbox, todos
-from ..channels import line
-from ..settings import get_settings
+from ..channels.notify import notify
 
 log = logging.getLogger(__name__)
 
@@ -38,13 +37,6 @@ async def todo_reminders_cron(ctx: dict[str, Any]) -> int:
 
 
 async def _push(n: int, overdue: int) -> None:
-    """Todo titles can hold private details, so LINE only gets a generic line; the titles are in the Inbox."""
-    s = get_settings()
-    if not (s.line_owner_user_id and s.line_channel_access_token):
-        return
-    text = f"📌 {n} todo reminder{'s' if n > 1 else ''}" + (f" ({overdue} overdue)" if overdue else "") + \
-        ". Open the Inbox on the web to see them."
-    try:
-        await line.push(s.line_owner_user_id, text)
-    except Exception:
-        log.exception("LINE todo reminder push failed")
+    """Todo titles can hold private details, so the notice is generic; the titles are in the Inbox."""
+    await notify(f"📌 {n} todo reminder{'s' if n > 1 else ''}" + (f" ({overdue} overdue)" if overdue else "") +
+                 ". Open the Inbox on the web to see them.")

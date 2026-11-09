@@ -98,13 +98,12 @@ def fake_inbox(monkeypatch, redis):
     monkeypatch.setattr(inbox, "add", f.add)
     monkeypatch.setattr(inbox, "get", f.get)
     monkeypatch.setattr(inbox, "set_status", f.set_status)
-    monkeypatch.setattr(inbox.get_settings(), "line_owner_user_id", "Uowner")
-    monkeypatch.setattr(inbox.get_settings(), "line_channel_access_token", "tok")
 
-    async def push(to, text):
+    async def notify(text):
         f.pushed.append(text)
+        return True
 
-    monkeypatch.setattr(inbox.line, "push", push)
+    monkeypatch.setattr(inbox, "notify", notify)
     return f
 
 
@@ -221,14 +220,13 @@ async def test_reminder_cron_sends_generic_line_text_full_title_in_inbox_and_res
         claimed.append((i, stage))
         return True
 
-    async def push(to, text):
+    async def notify(text):
         sent.append(text)
+        return True
 
     monkeypatch.setattr(todos, "reminder_candidates", cands)
     monkeypatch.setattr(todos, "claim_reminder", claim)
-    monkeypatch.setattr(todo_jobs.line, "push", push)
-    monkeypatch.setattr(todo_jobs.get_settings(), "line_owner_user_id", "Uowner")
-    monkeypatch.setattr(todo_jobs.get_settings(), "line_channel_access_token", "tok")
+    monkeypatch.setattr(todo_jobs, "notify", notify)
     monkeypatch.setattr(todo_jobs, "datetime", SimpleNamespace(now=lambda tz: NOW.astimezone(tz)))
     assert await todo_jobs.todo_reminders_cron({}) == 2
     assert claimed == [(1, 1), (2, 2)]

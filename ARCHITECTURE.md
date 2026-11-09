@@ -1566,7 +1566,6 @@ re-prioritise remaining phases from real usage and the decision log.
 - **10d Todo categories & personal logs** (§10d) — draft; open questions listed there.
 - **13 Finance dashboard** (§19) — draft; open questions listed there.
 - **Answer tiers** (§12d) — planned: chat / research / deep research per request, Jev picks chat vs research, next-step suggestions lead deeper; chat speed (parallel queries, snippets first, one message per turn).
-- **Telegram notifications + LINE replies only** (§19) — planned: every proactive message via one `notify()` to Telegram; LINE answers within the reply window, no push.
 - **Tutor agent** (§12e) — planned: `/tutor` route, English (B2, travel + reading) first; conversation/writing/speaking correction, SRS cards, grammar lessons; nodeReact `/Tutor`.
 - **Plan critique** (§12) — planned: stronger-model checklist review of itineraries, shopping picks, SOP/review drafts; one revision max.
 - **Per-type checks beyond L9** (§12) — planned: assistant claimed-action + read-back first, then shopping budget/spec, research number matching, deep-research cross-checks.
@@ -1738,7 +1737,18 @@ Builds on nodeReact's existing Stock and Bitfinex pages instead of duplicating t
 - Alerts → LINE push to owner, deduplicated (one alert per issue per hour) + logged to Inbox.
 - Quiet alerts (policy `alerts.quiet_prefixes`, default `queue:` = a job waiting too long, e.g. during the nightly eval): logged to the `alerts` table only, no LINE/Inbox; the next morning brief lists the last 24 h of them (2026-11-04).
 
-### Planned: notifications on Telegram, LINE replies only (decided 2026-11-06, not built)
+### Notifications on Telegram, LINE replies only (decided 2026-11-06; implemented 2026-11-09)
+**Status:** Telegram notices are built: `app/channels/telegram.py` (send-only) and `app/channels/notify.py`
+(`notify(text)`, never raises). All 7 proactive `line.push` calls now go through `notify()`, and `line.deliver`
+sends via Telegram instead of LINE push when the reply token is stale. `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_OWNER_CHAT_ID` (env, not policy) are both needed; until both are set, `notify()` falls back to LINE push.
+`api.telegram.org` is on the egress allowlist.
+LINE side: `run_agent` wraps the graph in `asyncio.timeout` until `reply_ts + executor.line_deadline_s` (35 s). When
+it expires, the run stops in **every** mode (CPU or not, owner's choice 2026-11-09) and replies `line_too_late_text`
+with the reply token (outcome `too_late`). A LINE turn never escalates on a failed L9 check (`stopped: LINE reply
+window`, warning appended). `line.deliver` never pushes: a missed window goes to Telegram, or is dropped with a
+quiet `line:dropped:*` alert. `line.push` is only left as the `notify()` fallback when Telegram is not configured.
+
 LINE push messages count against a monthly quota; reply-token replies are free. Proactive messages move to Telegram
 (no monthly quota), and LINE only answers the owner's messages.
 
@@ -1757,8 +1767,9 @@ LINE push messages count against a monthly quota; reply-token replies are free. 
 **LINE: chat only, answered within the reply window**
 - LINE already forces the chat route and caps the model at `cloud_fast` (`decision.py` rule 6); the model choice
   stays (local or cloud_fast, as the router picked).
-- New: a LINE turn has a deadline below `line_reply_token_ttl_s` (e.g. 35 s of 50 s, VERIFY the real expiry). Near
-  the deadline it stops searching/reading and answers with what it has. On LINE a failed L9 check does not
+- New: a LINE turn has a deadline below `line_reply_token_ttl_s` (e.g. 35 s of 50 s, VERIFY the real expiry). At
+  the deadline it stops and replies that it ran out of time (built; the earlier "answer with what it has" idea was
+  dropped). On LINE a failed L9 check does not
   escalate to a bigger model; the warning is appended instead.
 - The push fallback in `line.deliver` is removed: a turn that still misses the window is dropped and logged as a
   quiet alert (no push). Goal: zero LINE push messages per month.
@@ -1768,8 +1779,7 @@ LINE push messages count against a monthly quota; reply-token replies are free. 
 **Acceptance:** all proactive messages arrive on Telegram, none on LINE; a month of use shows zero LINE pushes; a
 LINE answer never arrives after the reply window; PRIVATE notices on Telegram carry no content.
 
-**Open:** what the GAMING (`local_cpu`) path does when it cannot meet the LINE deadline (short "ask on the web"
-reply vs. a smaller answer).
+**Decided 2026-11-09:** GAMING (`local_cpu`) and every other mode reply 「來不及」 at the deadline.
 
 ### Egress allowlist (`config/egress-allowlist.yaml`)
 - Allowed: TypeSafe API, OpenAI, Anthropic, LINE API/content, GitHub (api, github.com, Copilot endpoints — VERIFY list), package registries (npm, PyPI) for sandboxes, Hugging Face (model downloads, can be disabled after setup), Ollama registry.

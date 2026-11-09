@@ -14,6 +14,8 @@ api.open-meteo.com
 # LINE
 api.line.me
 api-data.line.me
+# Telegram (§19 notices, send-only)
+api.telegram.org
 # Ollama registry (model pulls)
 registry.ollama.ai
 ollama.com
