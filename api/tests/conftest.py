@@ -46,6 +46,8 @@ def no_db(monkeypatch):
 
     for name in ("add", "resolve_run", "notify_question", "memory_written"):
         monkeypatch.setattr(inbox, name, noop)
+    from app import history
+    monkeypatch.setattr(history, "load", noop)  # no rolling summary unless a test sets one
     return calls
 
 

@@ -556,7 +556,16 @@ Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and
 
 ## 10. Memory, RAG, todos
 
-- **Short-term:** LangGraph checkpoints per thread; summarisation node when context > threshold.
+- **Short-term:** LangGraph checkpoints per thread (never rewritten). **Rolling compaction** (`app/history.py`,
+  policy `history`, 2026-11-09): the model sees one running summary of older turns (table `thread_summaries`) + the
+  turns after it verbatim (cap `executor.max_history_turns`). After a reply, `compact_thread` (background queue,
+  local model; PRIVATE threads always local, summary stays private) folds all but the last `keep_turns` (6) when
+  `compact_every` (10) turns are unsummarised or the verbatim part exceeds `max_tokens` (12k est.), or all but
+  `topic_keep_turns` (2) when the task type changes (chitchat ignored). Skipped while a clarifying question is pending.
+  Summary sections: constraints/preferences (never dropped), done actions, question → conclusion with exact facts,
+  sources, corrections, open items; tool output, excerpts, thinking and small talk are dropped. The latest long owner
+  paste/attachment (≥ `pin_min_chars`) from folded turns stays verbatim until a newer one is in the window.
+  Verified live 2026-11-09: 48-turn thread, 2.5k-char summary in 12 s on qwen3.5:9b.
 - **Long-term (`PostgresStore`) namespaces:** `("me","profile")`, `("me","episodes")`, `("me","coding_episodes")`, `("me","procedures")`.
 - **RAG tables:** `documents`, `chunks(id, doc_id, text, embedding vector, tsv/trgm, source, path, date, privacy_tag, hash)`; HNSW index.
 - Chunking: 400–800 tokens, ~15% overlap, heading-aware. Re-index on hash change only.
@@ -913,6 +922,18 @@ Owner preferences, applied to **every** answer:
 
 Claims are classified first: greetings, creative writing, opinion, pure reasoning/math are `exempt` (no source); every factual claim needs a citation or an "unverified" label.
 PRIVATE threads never use web tools; they may cite only the local knowledge base (§10a). In the default `cite_only` mode they cite the docs folder and vault (phase 10/10a); in verify mode every factual claim on a PRIVATE thread is still labelled unverified (follow-up, see below).
+
+**Concise mode** (policy `answer_style`, 2026-11-09): output tokens are ~80% of local answer time (214 runs: median
+1,070 output tokens / 20.7 s, ~16 ms per token). With `concise: true`, cite_only compose and ReAct prompts get a
+brevity rule (≤ `max_sentences`, key fact first, or only one short question about the owner's intent when the
+request is broad/unclear), `assess_ambiguity` also asks when a short answer would have to guess, and grounded
+compose is capped at `max_tokens` (400, was 1500). ReAct has no token cap (it does not turn Qwen thinking off).
+Shopping and coding are unchanged. Live 2026-11-09 (search/verify/think off): 6–8 s per answer; "推薦一台筆電" asked
+for the intent.
+
+**Citations switch** (`grounding.citations`, default true; set false 2026-11-09): cite_only still gathers KB/web
+sources and gives them to compose as background, but the prompt asks for no numbers/URLs/sources list, stray `[n]`
+are stripped, there is no sources tail, and a bad URL is removed without a re-compose.
 
 ### MVP subset (implemented 2026-10-22)
 The full graph below is phase 8a. The MVP ReAct graph already does:

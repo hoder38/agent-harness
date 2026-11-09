@@ -44,7 +44,7 @@ eval:
 # L9 verify (§12, phase 10b): check each finished answer; a failed one is re-run local → cloud_fast → cloud_strong
 # (never for PRIVATE or under the cloud kill switch, never after a write tool ran), then reported in the Inbox.
 verify:
-  enabled: true
+  enabled: false              # 2026-11-09 off for speed (owner will re-enable)
   min_score: 0.3              # Jev/Qwen "fully and correctly answers"; calibrated on 77 real turns (bad ones ≤0.2)
   max_escalations: 2
   require_citations: false    # true: verdict "uncited" fails. Off: a bigger model reruns the same retrieval, so it
@@ -66,8 +66,8 @@ clarify:
 
 # Per-turn caps on tool calls (one user turn, across clarify resumes).
 tool_limits:
-  web_search: 3
-  fetch_page: 4
+  web_search: 0   # 2026-11-09 off for speed (was 3; owner will re-enable)
+  fetch_page: 0   # was 4
 
 # Grounded answering (§12a): clarify → verify claims → cite. enabled=false falls back to the ReAct graph.
 grounding:
@@ -75,6 +75,7 @@ grounding:
   # cite_only (default): clarify -> search -> read cite_pages pages -> answer with [n] citations; no per-claim
   #   checks or "Unverified" list. verify: full §12a claim verification (slower, noisier on the 9B model).
   mode: cite_only
+  citations: false                  # 2026-11-09 off: sources are background only, no [n] / sources list (was true)
   # Brave locale (both search tools): country=TW always; search_lang only for queries containing Chinese. 2026-11-03.
   search_country: TW
   search_lang_cjk: zh-hant
@@ -95,7 +96,7 @@ grounding:
   # max_tokens, so these calls get local_think_tokens extra. Never on local_cpu. Measured 2026-10-28 with
   # [verify_support, compose] on qwen3.5:9b: ~140 s/turn, blows max_active_s, empty answers. 2026-10-29 bench
   # (compose only, 11 prompts): 6.3 -> 7.1/10 judged quality, 7 -> 22 s, up to ~4.6k thinking tokens.
-  local_think_tasks: [compose]
+  local_think_tasks: []            # 2026-11-09 off for speed (was [compose])
   local_think_tokens: 4096
 
 # §12c shopping: requests to choose/buy a product (推薦/想買/預算/… hints, or a follow-up within session_ttl_s)
@@ -149,10 +150,34 @@ router:
 executor:
   recursion_limit: 90            # 10 clarify rounds x3 + 3 research loops x5 + fixed nodes ~= 55
   assistant_history_turns: 20    # assistant route: earlier tool calls are hidden (Qwen copies them); was 8 until 2026-11-06
-  max_history_turns: 20          # keep last N user turns in the model context
+  max_history_turns: 20          # safety cap on verbatim user turns in the model context (see history:)
   line_max_chars: 4500
   line_reply_token_ttl_s: 50     # VERIFY current LINE reply-token expiry
   private_line_notice: "🔒 The answer contains private data. Open the web app to read it."
+
+# Concise mode (2026-11-09, for speed: output tokens are ~80% of local answer time, ~16 ms/token): grounded compose
+# and ReAct answers get a brevity rule (≤ max_sentences, or one short question about the owner's intent when unclear);
+# grounded compose is capped at max_tokens (was 1500). Shopping and coding are unchanged. concise: false = old style.
+answer_style:
+  concise: true
+  max_sentences: 3
+  max_tokens: 400
+
+# Rolling compaction (app/history.py, 2026-11-09): older turns are folded into one running summary per thread
+# (local model, background queue, after the reply); the model sees summary + the turns after it verbatim.
+# Summary keeps constraints/preferences, completed actions, question → conclusion, sources, corrections, open items;
+# drops tool output, page excerpts, thinking, small talk. Local context is 32768 tokens (OLLAMA_CONTEXT_LENGTH).
+history:
+  enabled: true
+  keep_turns: 6            # most recent owner turns always kept verbatim
+  compact_every: 10        # fold when this many turns beyond keep_turns are not yet summarised
+  max_tokens: 12000        # ...or sooner when the verbatim history is estimated above this (~1/3 of the context)
+  topic_keep_turns: 2      # task type changed (topic_ignore_types ignored): fold all but this many
+  topic_ignore_types: [chitchat]
+  summary_max_chars: 3000
+  pin_min_chars: 1500      # an older owner message this long (paste / attachment) stays verbatim; latest one only
+  pin_max_chars: 4000
+  model: local             # PRIVATE threads always use local
 
 queues:
   interactive: { name: "arq:interactive", timeout_s: 300 }

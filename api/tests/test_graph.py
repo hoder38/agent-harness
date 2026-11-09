@@ -96,3 +96,14 @@ def test_system_prompt_grounding_rules():
     assert "ONE short clarifying question" in clarify and GROUNDING_OFFLINE not in clarify
     assert GROUNDING_WEB in system_prompt("chat", "web", "cloud_fast", web=True)
     assert GROUNDING_OFFLINE in system_prompt("chat", "web", "local", web=False)
+
+
+def test_concise_mode_adds_the_brevity_rule_except_for_clarify_and_coding(monkeypatch):
+    from app import config
+    from app.graphs.main import concise_rule, system_prompt
+
+    monkeypatch.setattr(config, "policy", lambda: {"answer_style": {"concise": True, "max_sentences": 2}})
+    assert "at most 2 short sentences" in system_prompt("chat", "web", "local")
+    assert "Be brief" not in system_prompt("clarify", "web", "local")
+    assert "Be brief" not in system_prompt("coding", "web", "local")
+    assert concise_rule({"answer_style": {"concise": False}}) == ""

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
-from .. import config, db, inbox, media, state, verify
+from .. import config, db, history, inbox, media, state, verify
 from ..channels import line
 from ..graphs.coding import build_coding_graph
 from ..graphs.grounded import SKIP, build_grounded_graph
@@ -267,6 +267,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
     try:
         llm = make_llm(model, ks)
         max_turns = int(ex.get("max_history_turns", 20))
+        summary = None if coding else await history.load(job.thread_id, private=decision.private)
         if coding:
             async def notify(text: str) -> None:
                 await state.emit(r, run_id, "token", text)
@@ -278,7 +279,8 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                                        cancelled=is_cancelled, checkpointer=ctx["checkpointer"])
             answer_nodes: set[str] = set()
         elif grounded:
-            graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns)
+            graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns,
+                                         summary=summary)
             answer_nodes = {"compose"}
         else:
             tools = tools_for(route, private=decision.private)
@@ -294,6 +296,7 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                 max_turns=min(max_turns, int(ex.get("assistant_history_turns", 8))) if route == "assistant" else max_turns,
                 drop_old_tools=route == "assistant",
                 require_tool=need,
+                summary=summary,
                 tool_limits={k: int(v) for k, v in (pol.get("tool_limits") or {}).items()},
                 checkpointer=ctx["checkpointer"],
             )
@@ -478,6 +481,11 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                                          private=decision.private, channel=job.channel)
         except Exception:
             log.exception("memory after_turn failed")
+        try:
+            await history.after_turn(ctx["redis"], thread_id=job.thread_id, messages=vals.get("messages", []),
+                                     task_type=decision.task_type, private=decision.private)
+        except Exception:
+            log.exception("history after_turn failed")
     return {"status": "done"}
 
 

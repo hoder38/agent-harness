@@ -456,7 +456,7 @@ def test_numbers_in_maps_month_names_next_to_digits():
 # ---------------------------------------------------------------- cite_only mode
 @pytest.fixture
 def cite(make, policy):
-    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "cite_pages": 2}}
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "cite_pages": 2, "citations": True}}
     return lambda script, web=None, **kw: make(script, web, pol=pol, **kw)
 
 
@@ -545,6 +545,16 @@ async def test_cite_only_renumbers_cited_sources_in_order_of_use(cite):
     out, _ = await run(g, inp("OpenAI pricing?"))
     assert out["answer"]["text"].startswith("B says so [1]. Also [1].\n\nSources:\n[1] Title https://openai.com/b")
     assert out["answer"]["citations"] == [{"n": 1, "source_id": "s2", "url": "https://openai.com/b"}]
+
+
+async def test_citations_off_uses_sources_as_background_without_numbers_or_source_list(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "cite_pages": 2, "citations": False}}
+    web = Web(hits={"pricing": ["https://openai.com/api/pricing"]}, pages={"https://openai.com/api/pricing": "x"})
+    g, llm, _ = make({"plan_search": PLAN, "compose": "Input costs $2 [1]. See https://evil.example/p"}, web, pol=pol)
+    out, _ = await run(g, inp("OpenAI pricing?"))
+    assert llm.calls.count("compose") == 1  # no re-compose for citation problems
+    text = out["answer"]["text"]
+    assert text == "Input costs $2. See" and out["answer"]["citations"] == []
 
 
 # ---------------------------------------------------------------- media (§5)

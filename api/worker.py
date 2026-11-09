@@ -3,7 +3,7 @@ from arq import cron, func
 from arq.connections import RedisSettings
 
 from app.config import load_yaml
-from app import schedules
+from app import history, schedules
 from app.jobs import alerts, copilot_jobs, media_jobs, memory_jobs, todo_jobs
 from app.tools.answer_eval import answer_eval_job
 from app.jobs.worker import run_agent, shutdown, startup
@@ -44,7 +44,7 @@ class BackgroundSettings:
     """Background / coding / media queue. (arq ignores inherited attributes, so list them all.)"""
     redis_settings = _redis
     functions = [run_agent, media_jobs.submit_media_run, memory_jobs.extract_memory, memory_jobs.summarize_episode,
-                 memory_jobs.index_docs_job, copilot_jobs.ingest_copilot, func(answer_eval_job, timeout=3600, max_tries=1)]
+                 history.compact_thread, memory_jobs.index_docs_job, copilot_jobs.ingest_copilot, func(answer_eval_job, timeout=3600, max_tries=1)]
     on_startup = startup
     on_shutdown = shutdown
     max_tries = 3
