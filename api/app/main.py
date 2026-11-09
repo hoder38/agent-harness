@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from . import db, mcp_server, state
-from .routes import events, inbox, ingest, internal, line, memory, schedules, todos, uploads, web
+from .routes import events, inbox, ingest, internal, line, memory, schedules, today, todos, uploads, web
 from .settings import get_settings
 from .telemetry import setup_tracing
 
@@ -48,6 +48,7 @@ app.include_router(inbox.router)
 app.include_router(schedules.router)
 app.include_router(events.router)
 app.include_router(uploads.router)
+app.include_router(today.router)
 
 
 @app.get("/healthz")

@@ -1,6 +1,6 @@
 """Todos (§10): one table used by the web UI (REST), agent tools and Copilot (MCP)."""
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -46,9 +46,28 @@ def parse_due(value: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=TZ)
 
 
-def out(row: dict[str, Any]) -> dict[str, Any]:
+def overdue_days(t: dict[str, Any], now: datetime | None = None) -> int | None:
+    """Calendar days an open todo is past due in Asia/Taipei (0 = due earlier today); None = not overdue (§10d)."""
+    due = t.get("due_at")
+    now = now or datetime.now(timezone.utc)
+    if t.get("status") != "open" or not due or due >= now:
+        return None
+    return (now.astimezone(TZ).date() - due.astimezone(TZ).date()).days
+
+
+def overdue_label(days: int | None, zh: bool = True) -> str:
+    if days is None:
+        return ""
+    if zh:
+        return f"逾期 {days} 天" if days else "今天已逾期"
+    return f"OVERDUE {days} day{'s' if days != 1 else ''}" if days else "OVERDUE (earlier today)"
+
+
+def out(row: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     # Postgres returns UTC; the web UI shows the first 16 characters, so hand it Asia/Taipei times
-    return {**row, **{k: row[k].astimezone(TZ).isoformat() if row.get(k) else None for k in ("due_at", "created_at", "updated_at")}}
+    days = overdue_days(row, now)
+    return {**row, **{k: row[k].astimezone(TZ).isoformat() if row.get(k) else None for k in ("due_at", "created_at", "updated_at")},
+            "overdue": days is not None, "overdue_days": days}
 
 
 async def add(title: str, *, notes: str = "", due_at: datetime | None = None, channel: str = "web") -> dict[str, Any]:
@@ -117,7 +136,8 @@ async def delete(todo_id: int) -> bool:
 def line(t: dict[str, Any]) -> str:
     due = f" (due {t['due_at'].astimezone(TZ).strftime('%Y-%m-%d %H:%M')})" if t.get("due_at") else ""
     mark = "x" if t["status"] == "done" else " "
-    return f"[{mark}] #{t['id']} {t['title']}{due}"
+    late = overdue_label(overdue_days(t), zh=False)
+    return f"[{mark}] #{t['id']} {t['title']}{due}{f' — {late}' if late else ''}"
 
 
 # ---- due reminders (cron in jobs/todo_jobs.py) ----

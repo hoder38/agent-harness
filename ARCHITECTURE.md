@@ -796,8 +796,10 @@ owner approval**.
 - Import: Notion CSV, open items only, category per source page.
 - Overdue todos are never deleted or auto-closed: they stay open and are marked overdue (red "逾期 N 天" badge in
   `/Todos` and the Today page, an "overdue" group at the top, `list_todos` output and the morning brief say
-  "overdue"). Only the owner completes or deletes a todo. (Today nothing auto-deletes either; the change is the
-  overdue display.)
+  "overdue"). Only the owner completes or deletes a todo. **Overdue display built 2026-11-09:** `todos.out()`
+  adds `overdue` / `overdue_days` (calendar days in Asia/Taipei; 0 = due earlier today), `list_todos` / MCP lines
+  end with "— OVERDUE …", the brief says 「逾期 N 天」, `/Todos` lists overdue items first in red with the badge.
+  Categories and shopping are still planned.
 
 **Personal logs** (reviews live in the vault, not in `todos`)
 - Media (book, movie, anime, series, game) share one collection `Media/` with `type`; trips, food and product
@@ -1556,7 +1558,7 @@ re-prioritise remaining phases from real usage and the decision log.
 | 10c | Knowledge curation (§10c): `vault.exclude_paths`, weekly `curate` schedule, Inbox proposals (new note / update / tidy / archive), per-item Gate 0 batching, reversible pseudonymisation; read-only nodeReact note viewer with clickable citations — **planned** | §10c acceptance list |
 | 10d | Todo categories + personal logs (§10d): `todos.category`, grouped `/Todos`; review collections in the vault, template-based review flow, nodeReact `/Logs` — **planned (draft)** | to be defined |
 | 11 | Cron/events, eval suite in CI, monthly restore test — **implemented 2026-11-04**, live-verified (brief → web thread + Inbox + LINE notice; restore test OK in 4 s) | Morning brief runs; eval regression check; restore test passes |
-| 12 | Today home page in nodeReact (§19): calendar, todos, shopping, Inbox, in-progress logs; harness status shown only on exceptions (no separate agent dashboard); one aggregate endpoint, read-only — **planned** | §19 "Today home page" acceptance list |
+| 12 | Today home page in nodeReact (§19): calendar, todos, shopping, Inbox, in-progress logs; harness status shown only on exceptions (no separate agent dashboard); one aggregate endpoint, read-only — **built 2026-11-09** (shopping and logs wait for §10d) | §19 "Today home page" acceptance list |
 | 13 | Finance dashboard (§19): Shioaji pull, finance-mailbox email ingest (statements, e-invoices) → `transactions`, owner-only nodeReact page — **planned (draft)** | to be defined |
 
 **Remaining (2026-11-04):**
@@ -1570,7 +1572,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - **Plan critique** (§12) — planned: stronger-model checklist review of itineraries, shopping picks, SOP/review drafts; one revision max.
 - **Per-type checks beyond L9** (§12) — planned: assistant claimed-action + read-back first, then shopping budget/spec, research number matching, deep-research cross-checks.
 - **Coding review before approval** (§9a) — planned: Copilot code-review + security-review on the diff, findings in the approval item.
-- **12 Today home page** (§19) — planned: nodeReact `/Today` backed by `GET /api/agent/today`; harness health only when something needs attention.
+- **12 Today home page** (§19) — built 2026-11-09; left: shopping list and in-progress logs (need §10d), Copilot-credit/backup cards, controls.
 - **10c Knowledge curation** (§10c) — planned: `Views/` exclusion, weekly curation proposals via Inbox, privacy-split routing, read-only note viewer (`/Notes`) with clickable citations.
 - **Media gaps** (§5) — no cloud ASR/vision fallback; HEIC untested live; PDFs > 50 pages skip Docling.
 - **Vault** (§10a) — Notion import (owner step); optional browser Obsidian container; Inbox triage / weekly vault health report / unindexed staging folder discussed and postponed.
@@ -1682,7 +1684,7 @@ re-prioritise remaining phases from real usage and the decision log.
 - Conflicting facts: newest wins, previous kept as history; UI shows history.
 - Every agent memory write is visible in the Inbox as a low-priority item. (Implemented 2026-10-29 as nodeReact `/Memory`: memories plus a knowledge-base tab; Inbox items: phase 7.)
 
-### Today home page with exception-only harness status (nodeReact) — planned (decided 2026-11-05, not built)
+### Today home page with exception-only harness status (nodeReact) — built 2026-11-09 (decided 2026-11-05)
 One owner-only page `/Today` (candidate nodeReact landing page) that answers "what do I need to do today"; the
 harness health view is folded into it and **only shows up when something needs attention** — no separate agent
 dashboard. nodeReact constraints: React 17, chart.js **2.9** (v2 API), Node 14 toolchain — see `AGENTS.md`.
@@ -1709,6 +1711,13 @@ dashboard. nodeReact constraints: React 17, chart.js **2.9** (v2 API), Node 14 t
 - **Acceptance:** loads in < 1 s from a warm API; with a healthy harness only the "all OK" line appears; stopping
   a container, setting the kill switch or a forced eval regression each produce exactly one card that disappears
   when resolved; counts match `/status` and the morning brief.
+- **Built 2026-11-09:** `app/today.py` + `GET /api/agent/today` (owner-only); nodeReact `/Today` (first agent menu
+  entry), read-only, polls 60 s. Weather cached 1800 s, calendar 120 s (null when not connected); warm call ~2 ms.
+  The alert watcher stores its last result in Redis `health:last` (`{ts, issues}`, TTL 600 s); a result older than
+  180 s is itself a card. Cards today: kill switch, GPU override, watcher issues (containers, heartbeats, queue,
+  spend), latest eval regressions, enabled schedules whose `last_status` is an error, open Inbox alerts of the last
+  24 h (minus keys already live), open verify items. Not yet: shopping list and in-progress `/Logs` (wait for
+  §10d), Copilot-credit and backup cards, controls.
 
 ### Finance dashboard — planned (draft, decided 2026-11-05; details open)
 A separate owner-only nodeReact page (not part of `/Today`): net worth, income/spending, investments.

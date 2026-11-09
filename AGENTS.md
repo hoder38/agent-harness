@@ -15,9 +15,15 @@ mirrors them, so update both when they change.
   chunk conflict, OpenSSL errors, babel mismatch).
 - Do not build or test inside the running `*-release` containers or write to `public/`; use a throwaway copy
   (e.g. under `/tmp`) mounted into a temporary container.
-- Front-end tests: `npx jest --config jest.front.cjs --forceExit src/front` inside the Node 14 container (18
-  suites / 1331 tests passed at phase 7 with the lockfile as-is; no babel upgrade is needed).
+- Front-end tests: `npx jest --config jest.front.cjs --forceExit src/front` inside the Node 14 container (19
+  suites / 1336 tests passed with the Today page with the lockfile as-is; no babel upgrade is needed).
+- Throwaway-container workarounds: `sed -i '/security/d' /etc/apt/sources.list` before installing git (the
+  bullseye-security mirror 404s); set `YOUTUBE_DL_SKIP_PYTHON_CHECK=1 YOUTUBE_DL_SKIP_DOWNLOAD=1` for `npm ci`.
 - Release build: `npm run build` in the same container (emits `release.js`).
+- Deploy (owner-approved flow): `docker compose -f docker-compose.dev.yml up -d`, `npm run dev-build` (writes the
+  untracked `public/release.js`), then `docker compose -p anomopi -f docker-compose.release.yml build nginx
+  reactnode-server` and `up -d --no-deps nginx reactnode-server`. The nginx image bakes in `public/`, the server
+  image the menu in `basic-router.js`.
 - `package-lock.json` is lockfileVersion 1. Do not upgrade babel or add packages that rewrite it to v3 or need
   Node > 14; plain `npm ci` must keep working.
 

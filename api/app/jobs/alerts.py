@@ -13,6 +13,9 @@ from ..settings import get_settings
 log = logging.getLogger(__name__)
 
 
+HEALTH_KEY = "health:last"
+
+
 def is_quiet(key: str, pol: dict[str, Any] | None = None) -> bool:
     """Keys under `alerts.quiet_prefixes` are only logged, then reported in the morning brief (no LINE, no Inbox)."""
     prefixes = ((pol or config.policy()).get("alerts") or {}).get("quiet_prefixes") or []
@@ -119,5 +122,8 @@ async def alert_watcher(ctx: dict[str, Any]) -> None:
             issues += await check
         except Exception as e:
             issues.append((f"watcher:{type(e).__name__}", f"health check failed: {e}"))
+    # the Today page (§19) reads this instead of calling Docker per request
+    await state.get_redis().set(HEALTH_KEY, json.dumps({"ts": time.time(), "issues": [
+        {"key": k, "message": m} for k, m in issues]}), ex=600)
     for key, msg in issues:
         await send_alert(key, msg)

@@ -65,6 +65,7 @@ def test_brief_line_notice_has_no_calendar_or_todo_text():
     for secret in ("看牙醫", "永和診所", "繳電費", "回信給房東"):
         assert secret in full and secret not in notice
     assert "10:00–11:00" in full and "11/04（三）" in full
+    assert "繳電費（逾期 1 天，" in full
     assert "中和 晴" in notice and "1 個行程" in notice and "1 個逾期" in notice and "US$0.12" in notice
 
 

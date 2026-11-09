@@ -58,7 +58,7 @@ async def test_agent_and_mcp_tools_share_the_todo_table(fake_todos):
     assert "Not added" in await todo_tools.add_todo.ainvoke({"title": "x", "due": "someday"})
     assert "Added todo #2" in await mcp_server.add_todo("Review PR", "2026-11-03T10:00")
     assert fake_todos.rows[2]["source_channel"] == "copilot"
-    assert (await mcp_server.list_todos()).splitlines()[0] == "[ ] #1 Buy tea (due 2026-11-02 23:59)"
+    assert (await mcp_server.list_todos()).splitlines()[0].startswith("[ ] #1 Buy tea (due 2026-11-02 23:59) — OVERDUE ")
     assert (await todo_tools.complete_todo.ainvoke({"todo_id": 1})).startswith("Done: #1")
     assert "#1" not in await mcp_server.list_todos() and "No todo #9" in await todo_tools.complete_todo.ainvoke({"todo_id": 9})
 

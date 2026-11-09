@@ -91,7 +91,8 @@ def compose(*, day: datetime, weather_lines: list[str], events: list[dict] | Non
         full += ["", f"📅 今天行程（{len(events)}）"] + [f"- {_event_line(e)}" for e in events]
         full += [] if events else ["- 沒有行程"]
     full += ["", f"✅ 待辦：{len(due)} 個今天到期、{len(overdue)} 個逾期"]
-    full += [f"- ⚠️ {t['title']}（逾期，{t['due_at'].astimezone(todos.TZ):%m/%d %H:%M}）" for t in overdue]
+    full += [f"- ⚠️ {t['title']}（{todos.overdue_label((day.date() - t['due_at'].astimezone(todos.TZ).date()).days)}，"
+             f"{t['due_at'].astimezone(todos.TZ):%m/%d %H:%M}）" for t in overdue]
     full += [f"- {t['title']}（{t['due_at'].astimezone(todos.TZ):%H:%M}）" for t in due]
     full += ["", f"📥 Inbox：{counts.get('waiting', 0)} 個等你回覆，{counts.get('verify', 0)} 個回答未通過檢查"]
     parts = [f"{len(events)} 個行程" if events is not None else None, f"{len(due)} 個待辦到期",
