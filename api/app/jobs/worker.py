@@ -174,7 +174,7 @@ async def _graph_input(graph, cfg: dict, payload: dict[str, Any], job: Job, deci
         return {"messages": [msg]}
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": decision.route == "clarify",
-            "no_clarify": False, "task_type": decision.task_type, "confirm_task": decision.confirm_task,
+            "no_clarify": False, "task_type": decision.task_type, "needs_web": decision.needs_web, "confirm_task": decision.confirm_task,
             "correction": payload.get("correction"), "attachments": bool(job.attachments),
             "images": [a.id for a in job.attachments if a.kind == "image"]}
 
@@ -205,7 +205,7 @@ async def _escalation_input(graph, cfg: dict, start: dict[str, Any], payload: di
         return {"messages": [msg]}, run_cfg
     return {"messages": [msg], "run_id": run_id, "thread_id": job.thread_id, "channel": job.channel,
             "private": decision.private, "model": model, "force_clarify": False, "no_clarify": True,
-            "task_type": decision.task_type, "confirm_task": None, "correction": payload.get("correction"),
+            "task_type": decision.task_type, "needs_web": decision.needs_web, "confirm_task": None, "correction": payload.get("correction"),
             "attachments": bool(job.attachments),
             "images": [a.id for a in job.attachments if a.kind == "image"]}, run_cfg
 
@@ -293,8 +293,10 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                                        cancelled=is_cancelled, checkpointer=ctx["checkpointer"])
             answer_nodes: set[str] = set()
         elif grounded:
+            # Cloud turn on a free GPU: the request rewrite runs on the local Qwen (~0.7 s vs ~4 s on cloud).
+            rewriter = make_llm("local", ks) if model not in LOCAL_MODELS and gpu == "FREE" else None
             graph = build_grounded_graph(llm, policy=pol, checkpointer=ctx["checkpointer"], max_turns=max_turns,
-                                         summary=summary)
+                                         summary=summary, rewriter=rewriter)
             answer_nodes = {"compose"}
         else:
             tools = tools_for(route, private=decision.private)
@@ -358,6 +360,10 @@ async def run_agent(ctx: dict[str, Any], payload: dict[str, Any]) -> dict[str, A
                 if mode == "custom":
                     if isinstance(data, dict) and data.get("echo"):
                         echo = str(data["echo"])
+                    if isinstance(data, dict) and data.get("search"):
+                        shown = " · ".join(str(q) for q in data["search"])
+                        await state.emit(r, run_id, "status", {"status": "running", "step": f"🔍 {shown}"})
+                        await state.emit(r, run_id, "tool", {"name": f"🔍 {shown}", "content": ""})
                     continue
                 chunk, cmeta = data
                 if isinstance(chunk, AIMessageChunk):

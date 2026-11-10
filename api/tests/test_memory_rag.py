@@ -265,12 +265,45 @@ async def test_kb_is_searched_once_before_clarifying(kbgraph):
     g, llm, _, kb = kbgraph({"plan_search": {"needs_web": False}, "compose": "From notes [1]."})
     await run(g, inp("what does it do when I start a game?", force_clarify=True))
     # a sure hit answers "it" (even when the router flagged the request ambiguous) and is reused by research
-    assert "assess_ambiguity" not in llm.calls and kb.calls == [False]
+    assert "resolve_request" not in llm.calls and kb.calls == [False]
     weak = {**KB_HIT, "score": 0.1}
-    g, llm, _, kb = kbgraph({"assess_ambiguity": {"ambiguous": False}, "plan_search": {"needs_web": False},
+    g, llm, _, kb = kbgraph({"resolve_request": {"ambiguous": False}, "plan_search": {"needs_web": False},
                              "compose": "From notes [1]."}, hits=[weak],
                             mems=[{"namespace": "profile", "text": "The owner plays on Steam", "updated_at": None}])
-    await run(g, inp("what does it do when I start a game?"))
-    sysmsg = _system(llm, "assess_ambiguity")
+    await run(g, inp("what does it do when I start a game?", force_clarify=True))
+    sysmsg = _system(llm, "resolve_request")
     assert "owner's own documents have passages" in sysmsg and "- The owner plays on Steam" in sysmsg
     assert kb.calls == [False] and "The owner plays on Steam" in _system(llm, "compose")
+
+
+# ---------------------------------------------------------------- embeddings while GAMING
+@pytest.mark.parametrize("keep, num_gpu", [(["qwen3-embedding:0.6b"], None), ([], 0)])
+async def test_embed_stays_on_gpu_while_gaming_only_when_kept(monkeypatch, keep, num_gpu):
+    from app.rag import embed
+
+    sent = []
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"embeddings": [[0.0]]}
+
+    class Http:
+        async def post(self, url, json):
+            sent.append(json)
+            return Resp()
+
+    pol = config.policy()
+    monkeypatch.setattr(config, "policy", lambda: {**pol, "gpu_governor": {**pol["gpu_governor"], "keep_on_gaming": keep},
+                                                   "rag": {**pol["rag"], "embed_model": "qwen3-embedding:0.6b"}})
+    monkeypatch.setattr(embed, "_http", lambda: Http())
+
+    async def gaming(_r):
+        return "GAMING"
+
+    monkeypatch.setattr(embed.state, "get_gpu_state", gaming)
+    monkeypatch.setattr(embed.state, "get_redis", lambda: None)
+    await embed.embed(["x"])
+    assert sent[0]["options"].get("num_gpu") == num_gpu

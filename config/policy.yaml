@@ -1,6 +1,6 @@
 # Decision-layer policy (hot-reloaded on mtime change). Bump `version` on every change and
 # review with `python -m app.tools.replay --policy config/policy.next.yaml --since 14d` first.
-version: 2026-11-06.1
+version: 2026-11-10.1
 
 thresholds:
   clarify_below: 0.7      # intent confidence < this -> route=clarify on a local model (no tier bump)
@@ -9,7 +9,7 @@ thresholds:
   risky: 0.5              # router risky above this -> risky=True
   task_confirm_below: 0.7 # top task_type probability < this ...
   task_margin: 0.3        # ... or top-2 gap < this -> ask the owner which kind of answer (clarify.confirm_task_types)
-  correction: 0.6         # router `correction` above this -> re-route previous + current message as one request
+  correction: 0.35        # router `correction` above this -> re-route previous + current message as one request (0.6 until 2026-11-09)
 
 # Phase 11: morning brief (app/brief.py). Built in code, no model call. The full brief (calendar, due todos, weather,
 # Inbox counts, spend) goes to the private web thread `web:brief` + an Inbox item; LINE only gets weather and counts.
@@ -58,6 +58,11 @@ verify:
   warning_zh: "⚠️ 這個回答沒有通過自動檢查,可能不完整或不正確,請自行確認。"
   warning_en: "⚠️ This answer failed the automatic check and may be incomplete or wrong; please double-check."
 
+# Routes switched off: the decision layer sends them to chat (rule 1a, also /code). 2026-11-10: only chat until
+# the clarify rules are tuned (owner will re-enable).
+routes:
+  disabled: [assistant, coding]
+
 clarify:
   max_rounds: 10          # after this many clarify turns in a row, answer with stated assumptions
   context_ttl_s: 86400    # how long the next message counts as the answer to a clarifying question
@@ -66,8 +71,8 @@ clarify:
 
 # Per-turn caps on tool calls (one user turn, across clarify resumes).
 tool_limits:
-  web_search: 0   # 2026-11-09 off for speed (was 3; owner will re-enable)
-  fetch_page: 0   # was 4
+  web_search: 3   # 2026-11-10 back on: Jev needs_web gate, parallel search/fetch
+  fetch_page: 4
 
 # Grounded answering (§12a): clarify → verify claims → cite. enabled=false falls back to the ReAct graph.
 grounding:
@@ -83,9 +88,18 @@ grounding:
   # search_skip_task_types and turns the owner's documents already answer (rag.skip_clarify_score). 2026-11-03.
   always_search: true
   search_skip_task_types: [chitchat]
+  # ...and turns the router scores below this on needs_web (Jev: lookups 0.64-0.97, common knowledge 0.07-0.24).
+  # 2026-11-10 owner: 0.2.
+  web_threshold: 0.2
   search_history_turns: 3           # cite_only plan_search sees this many earlier turns (follow-ups like "那價格呢?")
   cite_pages: 2                     # pages read per turn (also capped by tool_limits.fetch_page)
   cite_chars: 4000                  # excerpt chars per page given to the model
+  # Models in this list read the best snippet_pages search snippets (title + description) instead of fetching
+  # pages. 2026-11-10 bench (6 web questions): cloud_fast as good with snippets as with full text (−4-5k input
+  # tokens; time about the same), local Qwen got 2/6 details wrong from snippets -> local keeps full text.
+  # Owner: cloud chat on snippets; revisit when a research mode exists.
+  snippet_models: [cloud_fast, cloud_strong]
+  snippet_pages: 6
   per_turn: { max_usd: 0.05, max_active_s: 90 }
   reserve_for_compose: { usd_fraction: 0.2, seconds: 15 }
   brave_usd_per_query: 0.0          # VERIFY plan price
@@ -98,13 +112,18 @@ grounding:
   # (compose only, 11 prompts): 6.3 -> 7.1/10 judged quality, 7 -> 22 s, up to ~4.6k thinking tokens.
   local_think_tasks: []            # 2026-11-09 off for speed (was [compose])
   local_think_tokens: 4096
+  # Cloud models that reason before answering count reasoning in max_tokens; with a small cap (compose 400,
+  # classify_source 120) the reasoning can use it all and leave an empty reply (finish_reason=length; seen
+  # 2026-11-10 on cloud_fast compose, 1 of 6 runs). These models get this many extra tokens; an empty capped
+  # reply is still retried once with double room. Not cloud_strong (Claude, no thinking unless asked).
+  reasoning_tokens: { cloud_fast: 2048 }
 
 # §12c shopping: requests to choose/buy a product (推薦/想買/預算/… hints, or a follow-up within session_ttl_s)
 # fill slots (item, budget, use, specs, must-haves, brand, store), ask what is unknown one question per round
 # (item, budget first; ≤ max_clarify_rounds; Skip searches now), search real store listings, recommend `picks` of them with name/price/store/link
 # rendered by code. Standing preferences the owner states are kept in Redis `shop:prefs`.
 shopping:
-  enabled: true
+  enabled: false             # 2026-11-10 off until clarify rules are tuned (owner will re-enable)
   stores: [pchome, momo, yahoo]     # tools/shop.py adapters; Shopee blocks automated clients
   max_clarify_rounds: 10           # one question per round: item, budget, use, 1-2 specs, must-have, brand, store
   max_candidates: 15                # listings shown to the model
@@ -208,11 +227,11 @@ media:
     voice: 請整理這段錄音的重點。
     mixed: 請說明這些附件的內容。
   asr:
-    model: large-v3-turbo             # faster-whisper; CUDA fp16 while FREE, CPU int8 otherwise
+    model: large-v3-turbo             # faster-whisper; CUDA fp16 in every GPU state, CPU int8 if CUDA fails
     cpu_threads: 8
     beam_size: 5
     initial_prompt: 以下是繁體中文的句子。
-    keep_alive_s: 300                 # unload after this idle time, or at once when gpu_state leaves FREE
+    keep_alive_s: 300                 # unload after this idle time (also while GAMING: only Qwen is unloaded)
   image:
     max_side: 1280                    # downscale before the vision model (EXIF always stripped)
     when_gpu_busy: ocr_only           # ocr_only | cloud (NORMAL files only, kill switch off, budget left)
@@ -242,10 +261,14 @@ gpu_governor:                # phase 4 (§11): app/governor.py, compose service 
   gaming_exit_s: 300       # stay GAMING this long after the condition clears
   busy_util: 70            # GPU util % sustained for busy_enter_s -> BUSY (ignored while harness jobs hold the GPU)
   busy_enter_s: 30
-  busy_free_vram_gb: 8     # free VRAM (not counting Ollama's own models) below this -> BUSY
+  busy_free_vram_gb: 8     # free VRAM (not counting Ollama's own models) below this for busy_enter_s -> BUSY
   busy_exit_s: 120
   inflight_short_s: 20     # a local run older than this when GAMING starts is moved off the GPU (cloud / deferred)
   heartbeat_ttl_s: 30      # no governor heartbeat for this long -> LINE alert
+  # Ollama models left in VRAM on GAMING (only the chat models are unloaded; 2026-11-09). Embeddings listed here
+  # also keep running on the GPU while GAMING (app/rag/embed.py). The reranker service is not Ollama: it stays on
+  # the GPU (~1.2 GB) regardless.
+  keep_on_gaming: [qwen3-embedding:0.6b]
 
 alerts:
   dedupe_s: 3600
@@ -257,7 +280,7 @@ rag:                         # phase 10 (§10): app/rag/, docs folder DOCS_DIR -
   embed_model: qwen3-embedding:0.6b   # 1024-dim; changing it needs a re-index (DROP TABLE chunks)
   embed_ctx: 2048
   embed_batch: 16
-  embed_keep_alive: 10m
+  embed_keep_alive: -1       # resident (2026-11-10); stays on the GPU while GAMING too (gpu_governor.keep_on_gaming)
   extensions: [.md, .markdown, .txt]
   max_file_kb: 2048
   index_interval_min: 5      # scheduler cron re-scans the docs folder (unchanged files are skipped by hash)

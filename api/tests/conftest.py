@@ -66,6 +66,21 @@ def verify_scores(monkeypatch):
     return scores
 
 
+@pytest.fixture(autouse=True)
+def all_features_on(monkeypatch):
+    """The live policy may switch routes/shopping off for a while (routes.disabled, shopping.enabled); tests cover
+    them all."""
+    from app import config
+
+    real = config.policy
+
+    def pol():
+        p = real()
+        return {**p, "routes": {"disabled": []}, "shopping": {**(p.get("shopping") or {}), "enabled": True}}
+
+    monkeypatch.setattr(config, "policy", pol)
+
+
 @pytest.fixture
 def policy():
     """Real policy, with RAG/memory off so graph tests never reach Postgres/Ollama (tests inject kb/recall), and

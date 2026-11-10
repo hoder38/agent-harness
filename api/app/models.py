@@ -60,6 +60,7 @@ class RouterResult(BaseModel):
     task_type: str | None = None              # jev_router.TASK_TYPES key: what kind of answer is wanted
     task_probs: dict[str, float] = {}         # probability per task type (best effort for LLM/rule routers)
     correction: float = 0.0   # the message corrects how the previous one was understood
+    needs_web: float = 1.0    # answering needs a web search (rules router: unknown, so search)
     source: Literal["jev", "qwen", "cloud_fast", "rules"]
     latency_ms: int = 0
     errors: list[str] = []
@@ -90,5 +91,6 @@ class Decision(BaseModel):
     risky: bool
     private: bool = False
     task_type: str | None = None
+    needs_web: float | None = None  # router's needs_web; None (older payloads) = search as before
     confirm_task: list[str] = []    # ≥2 task types to ask the owner to choose between (low router confidence)
     reasons: list[str]

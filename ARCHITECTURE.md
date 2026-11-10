@@ -53,7 +53,7 @@ Modalities: **text, voice, image, video, documents**.
 | Keyword search | `pg_trgm` (or ParadeDB `pg_search` for BM25 + CJK) |
 | Doc parsing | Docling |
 | ASR | faster-whisper large-v3-turbo (chosen, phase 9); OpenCC → Traditional Chinese |
-| OCR | RapidOCR 3.x, PP-OCRv6 small (one model: Simplified, Traditional, Japanese, English; onnxruntime CPU, baked into the image) |
+| OCR | RapidOCR 3.x, PP-OCRv6 small (one model: Simplified, Traditional, Japanese, English; onnxruntime-gpu with CPU fallback, baked into the image) |
 | Video | ffmpeg (audio extract + scene keyframes) |
 | File storage | Plain volume `/srv/agent/files/<sha256[:2]>/<sha256>` + Postgres `attachments` metadata (S3 later only if needed) |
 | LLM gateway | **LiteLLM proxy** — single endpoint for Ollama / OpenAI / Anthropic (keys, budgets, retries, fallback, cost log) |
@@ -69,8 +69,8 @@ Modalities: **text, voice, image, video, documents**.
 | Qwen3.5 9B Q6_K | ~8 GB |
 | KV cache, 32k ctx, q8 (`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`) | ~2–3 GB |
 | Embedding 0.6B | ~1.2 GB |
-| Reranker | ~1.1 GB |
-| ASR / VLM | load on demand only, short `keep_alive` |
+| Reranker (fp16, own CUDA torch; stays while GAMING) | 1.2 GB measured incl. CUDA context (2026-11-10) |
+| ASR / OCR / Docling (media-worker, CUDA; stay while GAMING) | measured 2026-11-10 in one process: RapidOCR 1.4 GB (incl. CUDA context), + Docling 1.4 GB, + Whisper 2.0 GB = 4.8 GB. Loaded on first use; only Whisper unloads (`asr.keep_alive_s`). OCR 0.45 s vs 0.9 s CPU per page image; first CUDA OCR after an image rebuild JIT-compiles ~30 s (cached in `/models/cuda-cache`) |
 
 ## 3. High-level flow
 
@@ -201,9 +201,9 @@ Idempotency: `dedupe_key` stored in Redis `SET NX` with TTL 24h; duplicates are 
 
   | Modality | GPU FREE | BUSY / GAMING | Notes |
   |---|---|---|---|
-  | voice | faster-whisper large-v3-turbo CUDA fp16 under the GPU semaphore (7.6 s clip in ~1 s) | CPU int8 (4.2 s) | ffmpeg → 16 kHz WAV → numpy (this PyAV build rejects faster-whisper's `metadata_errors`); s2twp; GPU model unloaded after `asr.keep_alive_s` or when the GPU leaves FREE |
+  | voice | faster-whisper large-v3-turbo CUDA fp16 under the GPU semaphore (7.6 s clip in ~1 s) | CPU int8 (4.2 s) | ffmpeg → 16 kHz WAV → numpy (this PyAV build rejects faster-whisper's `metadata_errors`); s2twp; GPU model unloaded after `asr.keep_alive_s` idle (since 2026-11-10 also used while BUSY/GAMING; CPU only if CUDA fails) |
   | image | RapidOCR + Qwen caption | OCR only, `degraded: true` (re-extracted next time) | EXIF-transposed, re-encoded without EXIF before any model; `image.when_gpu_busy: ocr_only` default; `cloud` = NORMAL files only, cost recorded from LiteLLM |
-  | doc | pdfium text; < 30 chars/page → render + OCR (scans); Docling for docx/xlsx/pptx and PDFs ≤ 50 pages | same (CPU) | > 20 pages or > 40 000 chars → `large_doc`: indexed into the KB (`upload/…md`) so answers cite it via RAG |
+  | doc | pdfium text; < 30 chars/page → render + OCR (scans); Docling (CUDA torch, `AUTO` accelerator) for docx/xlsx/pptx and PDFs ≤ 50 pages | same on CPU if CUDA is unavailable | > 20 pages or > 40 000 chars → `large_doc`: indexed into the KB (`upload/…md`) so answers cite it via RAG |
   | video | ffmpeg audio → ASR; scene cuts on a 320-px proxy, up to `video.max_frames` (16) → caption + OCR; timeline `[mm:ss] 🗣 …` / `🖼 …` | CPU, background | audio-only containers become `voice` |
 
   `killswitch=all` makes heavy extraction retry later; `media.max_jobs` (2) bounds concurrency.
@@ -333,12 +333,18 @@ questions = {
      criteria=TASK_TYPES),  # shopping | advice | factual | howto | chitchat (jev_router.py)
   "correction": Noul(instructions="The current message says the reply to the previous message misunderstood it, "
                                   "or restates what the user actually wanted (不是…, 我是說…, I meant…)"),
+  "needs_web": Noul(instructions="Answering the current message well needs looking up information on the web: "
+                                 "facts about a named product, person, place, game, film or company, prices, ... "
+                                 "Greetings, feelings, opinions, creative writing, maths, reasoning and general "
+                                 "common knowledge need no web search"),
 }
 ```
 **Task type and corrections (2026-10-29).** `task_type` picks the graph branch (only `shopping` searches stores);
 `RouterResult.task_probs` keeps Jev's probability per type. The Qwen/cloud router returns `task_type` +
 `task_confidence`; the rule router uses explicit purchase words (想買/購買/預算/500以下, buy) → shopping, how-to words
-→ howto, else advice. A `correction` > `thresholds.correction` (0.6) with a previous message makes the pipeline route
+→ howto, else advice. A `correction` > `thresholds.correction` (0.35; 0.6 until 2026-11-09, when follow-ups such as
+「Total games + all DLC」 (0.51) and 「this is another game」 (0.40) were missed and the graph re-asked from the fragment;
+no new question scored ≥ 0.25 in 157 owner messages) with a previous message makes the pipeline route
 `previous + "\n" + current` again as one fresh request (the first result is discarded) and pass that text to the graph
 as `correction`; the graph answers it and drops the shopping session. Measured on Jev: real corrections 0.95,
 other follow-ups ≤ 0.1; 「推薦適合冷凍且富含纖維素的食材」 → advice 1.0, 「想買調味料罐 500以下」 → shopping 0.98.
@@ -358,6 +364,9 @@ Pure, unit-tested function. Policy values in `config/policy.yaml` (hot-reloadabl
 def decide(job, gate0, router, gpu_state, budget) -> Decision:
     # order matters; first matching rule wins for each field
     # 1. override
+    # 1a. route in `routes.disabled` → chat (also /code). 2026-11-10: [assistant, coding] off, and
+    #     `shopping.enabled: false` (no shopping pipeline, no "shopping or advice?" question) until the clarify
+    #     rules are tuned; the owner re-enables them.
     # 2. PRIVATE  → model must be local
     #       if gpu_state == GAMING: routing = rule-based (§6, no model call);
     #       execution: interactive → local_cpu (warn, short answers); background → defer until FREE
@@ -368,9 +377,9 @@ def decide(job, gate0, router, gpu_state, budget) -> Decision:
     #    → answer with stated assumptions.
     # 4. code_multi > 0.6 or long_ctx > 0.6 → cloud_strong (cloud_fast if over budget)
     # 5. gpu_state in (BUSY, GAMING) and model == local and not PRIVATE → cloud_fast
-    # 6. channel == "line" → route is always "chat" (assistant/coding/clarify become chat: LINE is chat + notify only,
+    # 6. channel == "line" → route is "chat" or "clarify" (assistant/coding become chat: LINE is chat + notify only,
     #    todos/calendar/coding/approvals happen on the web); cloud_strong → cloud_fast; short plain-text answers.
-    #    The grounded graph can still ask its own clarifying question on LINE.
+    #    clarify stays (2026-11-10): only the router decides when to ask, so LINE would otherwise never ask.
     # 7. mode == "background" → stricter budget, risky actions queued for approval
     # 8. budget exceeded → downgrade + notify
     # 9. video / large doc → queue="background"
@@ -392,7 +401,7 @@ the harness only calls `http://litellm:4000/v1` with `model=<alias>`. Model name
 ```yaml
 model_list:
   - model_name: local          # GPU; keep_alive 10m
-    litellm_params: { model: os.environ/LOCAL_MODEL, api_base: http://ollama:11434, keep_alive: 10m }  # ollama_chat/qwen3.5:9b (no q6_K tag upstream)
+    litellm_params: { model: os.environ/LOCAL_MODEL, api_base: http://ollama:11434, keep_alive: -1 }  # resident; ollama_chat/qwen3.5:9b (no q6_K tag upstream)
   - model_name: local_cpu      # same model, CPU only (not a separate q4_K_M tag)
     litellm_params: { model: os.environ/LOCAL_MODEL, api_base: http://ollama:11434, num_gpu: 0 }      # VERIFY num_gpu is forwarded
   - model_name: cloud_fast
@@ -584,7 +593,7 @@ Run a `harness-memory` **MCP server** (inside agent-api, bound to 127.0.0.1) and
 - Embeddings: `qwen3-embedding:0.6b` via Ollama (1024 dims, HNSW). Queries get the instruct prefix. While GAMING the model is loaded with `num_gpu: 0`.
 - Search:
   - vector top-50 + keyword top-50 (Postgres `simple` tsvector; CJK indexed as character bigrams), fused with RRF;
-  - then the top 10 go to the CPU cross-encoder `reranker` service (`bge-reranker-v2-m3`), then the top 5, at most one chunk per (path, heading);
+  - then the top 10 go to the cross-encoder `reranker` service (`bge-reranker-v2-m3`; GPU fp16 since 2026-11-10, ~0.1 s per query vs ~4.2 s on CPU, same scores; CPU fallback), then the top 5, at most one chunk per (path, heading);
   - a hit is kept if its rerank score ≥ 0.01 **or** its vector similarity ≥ 0.45;
   - if the reranker is down or times out, results stay in RRF order with the vector floor.
 - Privacy:
@@ -736,7 +745,9 @@ owner approval**.
    - **new note** — SOP, decision record, problem/fix note; draft written to `AI/Curation/`;
    - **update** — new facts appended to an existing note (diff);
    - **tidy** — add aliases/tags/`[[links]]`, merge duplicates, file `Inbox/` captures into a folder;
-   - **archive** — stale or unused notes → `Archive/`.
+   - **archive** — stale or unused notes → `Archive/`;
+   - **source domain** (planned 2026-11-10) — official domains that web searches keep reading, proposed for
+     `config/search_sites.yaml`, so `plan_search` may use them after `site:` (§12a cite_only).
 4. **Missing facts are asked, not invented:** a draft lists open questions (e.g. "which system is used in step 3?")
    in a marked block; the owner's answers in the Inbox item are folded into the final note.
 5. **Approval** through the Inbox (`kind: approval`, `detail.curation`):
@@ -824,8 +835,8 @@ Container with NVML access (`capabilities: [utility]`) and read-only Docker even
 | State | Enter when | Exit when | Action |
 |---|---|---|---|
 | FREE | — | — | normal |
-| BUSY | GPU util > 70% for 30 s or free VRAM < 8 GB | below thresholds for 2 min | new non-private local jobs → cloud_fast |
-| GAMING | `steam-headless` container running **and** (NVENC encoder util > 0 or GPU util > 30%) | 5 min after condition clears | unload Ollama models (`POST /api/generate {"model": …, "keep_alive": 0}`), embeddings/reranker/ASR → CPU, all non-private → cloud, private background → defer |
+| BUSY | GPU util > 70% for 30 s or free VRAM < 8 GB for 30 s (Ollama load/unload blips last seconds; 2026-11-10) | below thresholds for 2 min | new non-private local jobs → cloud_fast |
+| GAMING | `steam-headless` container running **and** (NVENC encoder util > 0 or GPU util > 30%) | 5 min after condition clears | unload the Ollama chat models (`POST /api/generate {"model": …, "keep_alive": 0}`); models in `gpu_governor.keep_on_gaming` (embeddings) and the reranker/ASR/OCR/Docling stay on the GPU (2026-11-10, was: all → CPU); all non-private → cloud, private background → defer |
 
 - Publishes `gpu_state` and transitions to Redis (`SET gpu_state`, `PUBLISH gpu_state_changed`).
 - In-flight local jobs: short ones finish; long ones are requeued on cloud (non-private) or paused.
@@ -927,9 +938,8 @@ PRIVATE threads never use web tools; they may cite only the local knowledge base
 
 **Concise mode** (policy `answer_style`, 2026-11-09): output tokens are ~80% of local answer time (214 runs: median
 1,070 output tokens / 20.7 s, ~16 ms per token). With `concise: true`, cite_only compose and ReAct prompts get a
-brevity rule (≤ `max_sentences`, key fact first, or only one short question about the owner's intent when the
-request is broad/unclear), `assess_ambiguity` also asks when a short answer would have to guess, and grounded
-compose is capped at `max_tokens` (400, was 1500). ReAct has no token cap (it does not turn Qwen thinking off).
+brevity rule (≤ `max_sentences`, key fact first; a broad request gets the most likely reading, named, never only a
+question — since 2026-11-10, was "ask about the intent"), and grounded compose is capped at `max_tokens` (400, was 1500). ReAct has no token cap (it does not turn Qwen thinking off).
 Shopping and coding are unchanged. Live 2026-11-09 (search/verify/think off): 6–8 s per answer; "推薦一台筆電" asked
 for the intent.
 
@@ -995,7 +1005,7 @@ class GroundedState(MessagesState):
 
 ### Node flow
 ```
-START → ingest → assess_ambiguity ──ambiguous & clarify_used<10─▶ ask_user (interrupt) ──resume──┐
+START → ingest → resolve_request ───router-forced & clarify_used=0─▶ ask_user (interrupt) ──resume──┐
                       │◀──────────────────────────────────────────────────────────────────────────┘
                       ▼ clear, or cap reached → assumptions
                     draft → extract_claims ──no factual claims──────────────────────────────▶ compose
@@ -1005,7 +1015,7 @@ START → ingest → assess_ambiguity ──ambiguous & clarify_used<10─▶ as
                                   ▼ all resolved | budget exhausted
                     compose → final_check ──fail (1st)──▶ compose
                                   ▼ pass | 2nd fail → downgrade to unverified
-                    interpretation_conflict? ──yes & clarify_used<5──▶ ask_user
+                    interpretation_conflict? ──yes──▶ both readings as assumptions (never asks)
                                   ▼
                                  END
 ```
@@ -1014,7 +1024,7 @@ A `budget_guard` conditional edge sits before every costly node and routes to `c
 | Node | Kind | Behaviour |
 |---|---|---|
 | `ingest` | code | reset per-turn state; `private/channel/model` injected from `Decision` |
-| `assess_ambiguity` | LLM, structured, T=0 | → `{ambiguous, slot, question_to_user, options[≤3], assumption_if_skipped}`. Ask if: unclear referent; missing time/region/version that changes the answer; ≥2 plausible readings with different answers; conflicting constraints; `force_clarify`; and (since 2026-10-28) for advice/plans/recommendations/how-to, any missing detail that would change or personalise the answer (goal, audience, level, budget, platform, constraints). Most important first, one question per round, re-assessed after each answer; never for greetings or simple one-answer facts. A question matching an earlier one in the turn ends clarifying (no loops) |
+| `resolve_request` | LLM, structured, T=0 | **Only the router decides when to ask (2026-11-10).** → `{resolved_request}`, plus `{slot, question_to_user, options[≤3], assumption_if_skipped}` when `force_clarify` (router rule 3: ambiguous > 0.7 or intent confidence < 0.7; once per turn; skipped if a KB hit ≥ `rag.skip_clarify_score` settles it). `resolved_request` is the request rewritten to stand alone (subject taken from earlier turns, answers to questions folded in); it replaces `question`, so KB/memory/search queries, compose and the "My understanding" header see e.g. "Fight Night mission walkthrough in Hitman: Absolution" instead of "walkthrough for Fight Night". Not rewritten when the question carries attachment text. A first message with no router flag skips the call. **Model (2026-11-10):** local turns use their own model; cloud turns use the GPU Qwen (`rewriter`, passed by the worker only while the GPU is FREE; ~0.7 s vs ~4 s on cloud_fast, where `reasoning_effort: low` still spent ~100 reasoning tokens). With no rewriter and no router flag there is no call: compose reads the history itself and KB/memory lookups use `lookup_query` = previous owner message + this one. Before 2026-11-10 the model also asked on its own (referent, missing scope, several readings, advice details, "broad" in concise mode); live it asked about things the conversation had settled (Hitman thread: 5 questions, "a game or a news story?" about a mission of that game). A question matching an earlier one in the turn ends clarifying (no loops) |
 | `ask_user` | `interrupt()` | `clarify_used += 1`; resume value → `clarifications[-1].answer`, merged into `question`. At the cap, `assumption_if_skipped` → `assumptions` |
 | `draft` | LLM | internal draft (`tags=["internal"]`; the worker does not emit its tokens) |
 | `extract_claims` | LLM + code override | atomic claims + kind. Code forces `factual` for sentences with numbers, dates, prices, versions, or named entity + factual verb |
@@ -1025,7 +1035,7 @@ A `budget_guard` conditional edge sits before every costly node and routes to `c
 | `verify_support` | LLM quote + code checks | §Direct support; a claim is bound to one source once verified |
 | `compose` | LLM, streamed | §Output; 20 % of USD and 15 s are reserved for it |
 | `final_check` | code | §Final check |
-| `interpretation_conflict` | code + LLM | primary sources disagree on what the question means (e.g. two definitions) → ask, or list both readings as assumptions |
+| `interpretation_conflict` | code + LLM | primary sources disagree on what the question means (e.g. two definitions) → list both readings as assumptions (asked until 2026-11-10) |
 
 A claim backed only by T2 sources → `unverified` ("only secondary sources found").
 
@@ -1106,6 +1116,7 @@ grounding:
   pending_ttl_s: 86400              # an unanswered clarifying question expires after this
   local_think_tasks: [compose]      # Qwen thinking per step on local (see Implementation notes)
   local_think_tokens: 4096
+  reasoning_tokens: { cloud_fast: 2048 }  # extra max_tokens for cloud models that reason first
 executor:
   recursion_limit: 60               # max_rounds (10) clarify ×2 + 3 research loops ×5 + fixed nodes ≈ 45
 ```
@@ -1116,7 +1127,7 @@ executor:
 
 ### Light mode `grounding.mode: cite_only` (default since 2026-10-28)
 The owner found per-claim verification too heavy: 17–30 s per turn and long "Unverified" lists on the 9B model. Preference 2 (one primary source per claim) and preference 3 (an explicit unverified label) are relaxed to "cite the pages you read".
-- **Flow:** `ingest → assess_ambiguity ⇄ ask_user/wait_answer → research → compose → final_check`.
+- **Flow:** `ingest → resolve_request ⇄ ask_user/wait_answer → research → compose → final_check`.
 - **research:**
   - One LLM call returns `{needs_web, entity, queries ≤ 2}`.
   - Even if the model says no, the turn searches anyway when `_FACT_HINT` matches.
@@ -1125,6 +1136,29 @@ The owner found per-claim verification too heavy: 17–30 s per turn and long "U
     were often wrong, and it judged such requests "creative writing"). Skipped only for `search_skip_task_types`
     (`chitchat`) and when the owner's documents returned a hit ≥ `rag.skip_clarify_score`. With no planned query,
     the planner's `entity` is searched.
+  - **Router `needs_web` (owner decision 2026-11-10):** the router's `needs_web` score (Jev noul; the LLM routers
+    return it too, the rule router gives 1.0) travels `RouterResult → Decision → state.needs_web`. Below
+    `grounding.web_threshold` (0.2) the turn skips `plan_search` and the web. Measured on Jev (15 samples): lookups
+    (weather, stock price, news, specs, release dates, a game mission) 0.64–0.97; common knowledge, how-to, poems,
+    maths and chat 0.07–0.18; 「金針菇冷凍處理方法」 0.24. Jev answers it in the same ~0.2 s call; the old model-side
+    `needs_web` took 0.3–0.5 s on local Qwen (missed the game and the follow-up) and 1.4–2 s on cloud_fast.
+  - **Query rules (owner decision 2026-11-10):** query 1 is plain keywords (no `site:`); query 2 may add
+    `site:<domain>` only with a domain from `config/search_sites.yaml` (hot-reloaded; subdomains allowed, paths
+    dropped; imdb.com and wikipedia.org added 2026-11-10). Any other `site:` is removed in code (`clean_query`):
+    measured on 10 questions, local Qwen invented `food.gov.tw`, `centralweather.gov.tw`, `lih.gov.tw` (0 hits) and
+    cloud wrote `site:docs.python.org/3.14/whatsnew/...` (0 hits). Queries must not contain a guessed answer;
+    freshness only `pd` (weather, stock prices, today's news) / `pw` (recent news). With `always_search` the prompt
+    no longer asks for `needs_web` (the router decided). A query with `site:` or freshness that finds nothing is
+    retried once plain, within `tool_limits.web_search`. New `site:` domains are added by the owner — planned as a
+    proposal kind of vault curation (§10b), from domains that searches keep hitting.
+  - Searches run concurrently (3 Brave queries ≈ 1 s, the same as one) and pages are read in parallel batches of
+    `cite_pages` (a failed page is replaced from the next-ranked hits). The queries are streamed to the web client
+    as a `status` step and a `tool` entry (「🔍 q1 · q2」).
+  - **Snippets for cloud chat (owner decision 2026-11-10):** models in `grounding.snippet_models` (cloud_fast,
+    cloud_strong) fetch no pages; the best `snippet_pages` (6) hits become sources with title, age and snippet as
+    the excerpt. Bench of 6 web questions: cloud_fast was as good with snippets as with 2 full pages (about
+    4–5k fewer input tokens per turn, time about the same); local Qwen got 2 of 6 details wrong from snippets, so
+    local still reads `cite_pages` full pages. Revisit for a future research mode.
   - **Taiwan first (owner decision 2026-11-03):** the planner and `BASE_SYSTEM` assume Taiwan for place-dependent
     questions and write Chinese queries in Traditional Chinese. Brave gets `country=TW` (`grounding.search_country`) and,
     for Chinese queries, `search_lang=zh-hant` (`search_lang_cjk`); both search tools. Hits are fetched in the order
@@ -1171,6 +1205,7 @@ Deviations from, and details beyond, the design above:
   - `grounding.local_think_tasks` re-enables thinking per step with `local_think_tokens` extra headroom. [verify_support, compose] measured about 140 s per turn (over `max_active_s`) with empty answers; since 2026-10-29 only `[compose]` (4096). If thinking still uses the whole budget and leaves no visible text (seen 2026-11-03: 5.7k tokens, LINE got only the 「我理解為」 header), `call()` retries once with `think: false`.
   - The draft and compose prompts state the answer language explicitly; the 9B model drifted to Chinese on "the user's language".
   - Claim rows are given to compose as `(true) … [n]` / `(false) … source [n] says` / `(unchecked) …`, so the model doesn't copy "VERIFIED" labels into the answer.
+- **Cloud reasoning models:** models that reason before answering (gpt-6-luna, `cloud_fast`) count reasoning in `max_tokens` too: with compose at 400 the reasoning used the whole cap in 1 of 6 runs (2026-11-10, `finish_reason=length`, empty answer). `grounding.reasoning_tokens` adds headroom per model (cloud_fast 2048; brevity still comes from the concise rule — answers stayed 60–100 chars), and an empty reply with `finish_reason=length` is retried once with double room. Not for `cloud_strong`.
 - **Measured live (2026-10-28, local GPU):**
   - simple factual turn: 17–30 s;
   - clarify interrupt: about 1 s.
@@ -1180,7 +1215,7 @@ Deviations from, and details beyond, the design above:
 ### Tests (pytest + `GenericFakeChatModel` + `InMemorySaver` + `fakeredis`; monkeypatch `search_web`/`fetch_source`)
 | Area | Cases |
 |---|---|
-| Clarify | ambiguous referent → one interrupt with `slot=referent`; clear question → no interrupt; `route=clarify` asks when the model has a real question (no "null"/generic question, 2026-11-03); `clarify.max_rounds` ambiguous rounds → no further interrupt, answer has assumptions; web resume merges answer into `question`; LINE next message resumes, Gate 0 runs, `/skip` works; PRIVATE clarify sends notice only on LINE; waiting 10 min (fake clock) not counted in `active_ms` |
+| Clarify | router-forced ambiguous referent → one interrupt with `slot=referent`; the model alone never asks, and a follow-up is rewritten to `resolved_request` (Fight Night case, 2026-11-10); a first message without the router flag makes no call; `route=clarify` asks when the model has a real question (no "null"/generic question, 2026-11-03); LINE keeps `route=clarify`; web resume merges answer into `question`; LINE next message resumes, Gate 0 runs, `/skip` works; PRIVATE clarify sends notice only on LINE; waiting 10 min (fake clock) not counted in `active_ms` |
 | Authority | openai.com is T1 for OpenAI pricing, not for Anthropic pricing; only reuters/wikipedia → unverified and not cited; medium.com never fetched; redirect to rejected domain → rejected; unknown-domain LLM verdict cached (2nd call skips LLM) |
 | Support | quote not in excerpt → not verified; claim "$20" vs quote "$25" → `contradicted` with source's value; two T1 sources → one `[n]`; time-sensitive w/o date → fetched-date note; prompt injection in page does not change tiers or output |
 | Partial | 1 of 3 claims verified → `partial` with 2 reasons; greeting/creative only → no search, `exempt_only`; poem + one fact → only the fact needs a source; PRIVATE (KB missing) → no web calls, all facts unverified |
@@ -1237,7 +1272,7 @@ Goal: the agent can navigate, click, fill forms and use sites where the owner is
 
 **Goal:** "幫我推薦調味料罐" should end with 3–5 real products the owner can buy. Each one shows its real price, store, rating and link. Before that, the bot asks for whatever is missing (item and budget). It is a branch of the grounded graph (§12a), so the web clarify UI works unchanged.
 
-- **Flow:** `ingest → [confirm_intent → ask_user ⇄ wait_answer] → shop_slots → (ask_user ⇄ wait_answer → shop_slots) → shop_search → shop_compose → shop_check → END`. Non-shopping turns go to `assess_ambiguity` as before. Private threads never shop.
+- **Flow:** `ingest → [confirm_intent → ask_user ⇄ wait_answer] → shop_slots → (ask_user ⇄ wait_answer → shop_slots) → shop_search → shop_compose → shop_check → END`. Non-shopping turns go to `resolve_request` as before. Private threads never shop.
 - **Trigger (2026-10-29):** the router's `task_type == "shopping"` (§6), not keywords or the slot model; 「推薦…」 alone is usually `advice`. When decision rule 3b flags the task type as unsure, `confirm_intent` asks 「你是想：1. 找商品購買 2. 知識或建議」 (options from `TASK_LABELS`, no LLM); a number or label picks the type, `/skip` keeps the router's pick, free text uses the router's reading of the exchange. A follow-up within `session_ttl_s` (30 min) that the router still classes as shopping, such as "cheaper" or "another brand", refines the last search.
 - **Echo line:** every grounded answer except chitchat starts with 「我理解為：<label>—「<request>」」 (code-built, also streamed first), so a misread is visible and can be corrected (§6 correction).
 - **Slots (one LLM call, JSON):** item, item_specific, search_terms (1–2 store keywords), budget_min/max, no_budget, use_case, brand_pref, must_have, avoid, remember. Code enforces the following, because a 9B model gets these wrong:
@@ -1334,7 +1369,8 @@ runs on the local 9B model).
   writes the queries stays.
 - Parallel queries: keep the current count (at most 2 queries from `plan_search`, cap `tool_limits.web_search: 3`).
   Ask for different angles (e.g. official/primary source + latest news or reviews). Run them concurrently instead
-  of one after another (`grounded.py` cite_only search loop). Page reads run concurrently too.
+  of one after another (`grounded.py` cite_only search loop). Page reads run concurrently too. (Concurrency done
+  2026-11-10.)
 - Snippets first: give the compose step the Brave result snippets. Read full pages only when the snippets are not
   enough. Each page read gets a short timeout (about 2–3 s); a page that is too slow is skipped, not waited for.
 - One message per turn: no progress messages, partial answers, or late follow-up messages (LINE replies are
@@ -1438,7 +1474,7 @@ services:
   ollama:
     image: ollama/ollama
     environment:
-      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_KEEP_ALIVE=-1        # resident; governor unloads chat models on GAMING
       - OLLAMA_MAX_LOADED_MODELS=2
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0

@@ -81,7 +81,7 @@ async def test_asks_budget_then_recommends_only_real_listings(pol):
     assert "2. 調味料罐1號" in text and "不存在" not in text and "evil.example" not in text
     assert [c["url"] for c in out["answer"]["citations"]] == [P[1]["url"], P[0]["url"]]
     assert "預算 ≤ NT$300" in text
-    assert "assess_ambiguity" not in llm.calls and "plan_search" not in llm.calls
+    assert "resolve_request" not in llm.calls and "plan_search" not in llm.calls
 
 
 async def test_follow_up_refines_last_search(pol):
@@ -190,7 +190,7 @@ async def test_answer_mid_clarify_stays_in_shopping(pol):
     g, llm, calls = graph(pol, {"shop_slots": [base, {"shopping": False}, {**base, **KNOWN}], "shop_compose": "[1] ok"})
     out = await g.ainvoke(inp("想買調味料罐 500以下"), CFG)
     out = await g.ainvoke(Command(resume="自用"), CFG)
-    assert out["__interrupt__"] and "assess_ambiguity" not in llm.calls
+    assert out["__interrupt__"] and "resolve_request" not in llm.calls
 
 
 async def test_skip_stops_asking_and_searches(pol):

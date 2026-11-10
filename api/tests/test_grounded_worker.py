@@ -91,10 +91,11 @@ async def test_compose_tokens_stream_and_done_has_tail_and_grounding(redis, enq,
 
 
 async def test_clarify_interrupt_then_answer_resumes_the_same_turn(redis, enq, confs, llm):
-    box = llm({"assess_ambiguity": [{"ambiguous": True, "question_to_user": "Which phone?", "options": ["iPhone", "Pixel"]},
+    box = llm({"resolve_request": [{"ambiguous": True, "question_to_user": "Which phone?", "options": ["iPhone", "Pixel"]},
                                     {"ambiguous": False}],
                "draft": "Hello", "extract_claims": {"claims": []}})
     ctx = CTX()
+    confs.append(0.4)  # the router flags it: only the router asks
     first = await pipeline.submit(job("how much is that one", "a"), enq)
     assert (await worker.run_agent(ctx, enq.calls[-1]["payload"]))["status"] == "awaiting_input"
     t, q = (await events(redis, first.run_id))[-1]
@@ -121,10 +122,11 @@ async def test_clarify_interrupt_then_answer_resumes_the_same_turn(redis, enq, c
 
 
 async def test_skip_answers_with_assumption_and_without_pending_is_a_noop(redis, enq, confs, llm):
-    llm({"assess_ambiguity": {"ambiguous": True, "question_to_user": "Which?", "assumption_if_skipped": "the newest"},
+    llm({"resolve_request": {"ambiguous": True, "question_to_user": "Which?", "assumption_if_skipped": "the newest"},
          "draft": "Hi", "extract_claims": {"claims": []}})
     assert (await pipeline.submit(job("/skip", "z"), enq)).command_reply.startswith("Nothing to skip")
     ctx = CTX()
+    confs.append(0.4)  # the router flags it: only the router asks
     await pipeline.submit(job("that", "a"), enq)
     await worker.run_agent(ctx, enq.calls[-1]["payload"])
     res = await pipeline.submit(job("/SKIP", "b"), enq)
@@ -135,7 +137,7 @@ async def test_skip_answers_with_assumption_and_without_pending_is_a_noop(redis,
 
 
 async def test_router_clarify_route_forces_a_question(redis, enq, confs, llm):
-    llm({"assess_ambiguity": {"ambiguous": False, "question_to_user": "Which one do you mean?"}})
+    llm({"resolve_request": {"ambiguous": False, "question_to_user": "Which one do you mean?"}})
     confs.append(0.4)
     res = await pipeline.submit(job("that", "a"), enq)
     assert res.decision.route == "clarify"
@@ -149,7 +151,8 @@ async def test_line_gets_the_question_with_options(redis, enq, confs, llm, monke
         sent.append((to, text, token))
 
     monkeypatch.setattr(worker.line, "deliver", deliver)
-    llm({"assess_ambiguity": {"ambiguous": True, "question_to_user": "哪一支手機？", "options": ["iPhone", "Pixel"]}})
+    llm({"resolve_request": {"ambiguous": True, "question_to_user": "哪一支手機？", "options": ["iPhone", "Pixel"]}})
+    confs.append(0.4)  # the router flags it: only the router asks
     await pipeline.submit(job("那個多少錢", "a", channel="line", thread_id="line:U"), enq,
                           delivery={"line_user_id": "U", "reply_token": "R", "reply_ts": 0})
     await worker.run_agent(CTX(), enq.calls[-1]["payload"])
@@ -167,7 +170,7 @@ async def test_line_turn_past_the_deadline_stops_and_says_too_late(redis, enq, c
         return "reply"
 
     monkeypatch.setattr(worker.line, "deliver", deliver)
-    llm({"assess_ambiguity": {"ambiguous": False}})
+    llm({"resolve_request": {"ambiguous": False}})
     await pipeline.submit(job("今天天氣", "a", channel="line", thread_id="line:U"), enq,
                           delivery={"line_user_id": "U", "reply_token": "R", "reply_ts": time.time() - 40})
     assert (await worker.run_agent(CTX(), enq.calls[-1]["payload"]))["status"] == "too_late"
@@ -182,7 +185,8 @@ async def test_cancel_drops_the_pending_question_and_resume_endpoint_validates(r
 
     from app.routes import web
 
-    llm({"assess_ambiguity": {"ambiguous": True, "question_to_user": "Which?"}})
+    llm({"resolve_request": {"ambiguous": True, "question_to_user": "Which?"}})
+    confs.append(0.4)  # the router flags it: only the router asks
     res = await pipeline.submit(job("that", "a"), enq)
     await worker.run_agent(CTX(), enq.calls[-1]["payload"])
     req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(enqueue=enq)), headers={})
@@ -308,7 +312,7 @@ async def test_failed_answer_is_rerun_on_cloud_from_the_turn_start(redis, enq, c
 
 
 async def test_resumed_turn_is_rerun_with_the_owners_answer(redis, enq, confs, llm, verify_scores):
-    box = llm({"assess_ambiguity": [{"ambiguous": True, "question_to_user": "Which phone?"}, {"ambiguous": False}],
+    box = llm({"resolve_request": [{"ambiguous": True, "question_to_user": "Which phone?"}, {"ambiguous": False}],
          "draft": ["Dunno.", "The Pixel costs $499."], "extract_claims": {"claims": []}})
     ctx = {**CTX(), "redis": FakeArq()}
     await pipeline.submit(job("how much is that one", "a"), enq)
@@ -320,7 +324,7 @@ async def test_resumed_turn_is_rerun_with_the_owners_answer(redis, enq, confs, l
     msgs = await _messages(ctx)
     assert msgs[:3] == ["how much is that one", "Which phone?", "Pixel"] and len(msgs) == 4  # "Dunno." dropped
     assert "The Pixel costs $499." in msgs[3]
-    assert box["llm"].calls.count("assess_ambiguity") == 2  # the re-run does not ask again
+    assert box["llm"].calls.count("resolve_request") == 2  # the re-run does not ask again
 
 
 async def test_after_max_escalations_the_answer_is_sent_with_a_warning_and_an_inbox_item(

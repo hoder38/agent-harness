@@ -136,6 +136,7 @@ def test_line_is_chat_only(policy):
     for intent in ("coding", "assistant"):
         assert d(policy, j=job(channel="line"), r=rr(intent=intent)).route == "chat"
     assert d(policy, j=job(channel="web"), r=rr(intent="coding")).route == "coding"
+    assert d(policy, j=job(channel="line"), r=rr(ambiguous=0.9)).route == "clarify"   # only the router asks
 
 
 # 7. background budget
@@ -202,3 +203,17 @@ def test_task_type_not_confirmed_when_private_resuming_or_coding(policy):
     out = d(policy, j=pic, r=rr(task_type="shopping", task_probs={"shopping": 0.42, "factual": 0.41}))
     assert out.confirm_task == [] and out.task_type == "factual"
     assert "3b: not asked (attachments) → factual" in out.reasons
+
+
+# 1a. disabled routes
+@pytest.mark.parametrize("r, g", [(rr(intent="assistant"), None), (rr(intent="coding"), None), (rr(), g0(override="code"))])
+def test_disabled_route_goes_to_chat(policy, r, g):
+    pol = {**policy, "routes": {"disabled": ["assistant", "coding"]}}
+    out = d(pol, r=r, g=g)
+    assert (out.route, out.queue) == ("chat", "interactive")
+
+
+def test_shopping_off_never_confirms_shopping(policy):
+    r = rr(task_type="shopping", task_probs={"shopping": 0.5, "advice": 0.45})
+    assert d(policy, r=r).confirm_task
+    assert d({**policy, "shopping": {"enabled": False}}, r=r).confirm_task == []

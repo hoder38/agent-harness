@@ -47,9 +47,8 @@ GROUNDING_OFFLINE = (
 
 CONCISE_RULE = (
     "Be brief: answer in at most {sentences} short sentences (or that many short bullet points), key fact or number "
-    "first; no preamble, no restating the question, no closing offers or extra tips. If the request is unclear or so "
-    "broad that a short answer would have to guess or cover several readings, do not answer: reply only with one "
-    "short question asking what the owner wants, with up to 3 short options.")
+    "first; no preamble, no restating the question, no closing offers or extra tips. If the request is broad, answer "
+    "the most likely reading and name it in a few words; never reply with only a question.")
 
 
 def concise_rule(policy: dict[str, Any] | None = None) -> str:

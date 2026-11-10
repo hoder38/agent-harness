@@ -67,7 +67,7 @@ def _line_text_wait(job: dict[str, Any], delivery: dict[str, Any], kinds: list[s
 
 
 async def unload_idle(ctx: dict[str, Any]) -> None:
-    """Free VRAM: whisper leaves the GPU when idle or when the GPU stops being FREE (§11)."""
+    """Free VRAM: whisper leaves the GPU after asr.keep_alive_s idle (§11; it stays while GAMING)."""
     asr.unload_idle(await common.gpu_state())
 
 

@@ -5,7 +5,7 @@ model_list:
     litellm_params:
       model: os.environ/LOCAL_MODEL            # e.g. ollama_chat/qwen3.5:9b (no q6_K tag exists upstream)
       api_base: http://ollama:11434
-      keep_alive: 10m
+      keep_alive: -1                           # resident (GAMING unload is done by the governor)
   - model_name: local_cpu
     litellm_params:
       model: os.environ/LOCAL_MODEL

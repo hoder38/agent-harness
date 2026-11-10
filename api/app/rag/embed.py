@@ -1,7 +1,8 @@
-"""Embeddings (Ollama qwen3-embedding) and the CPU reranker client (§10).
+"""Embeddings (Ollama qwen3-embedding) and the reranker client (§10).
 
-Embeddings run on the GPU normally and on the CPU (`num_gpu: 0`) while the GPU is GAMING (§11), so indexing and
-recall keep working during games. Both are local services on the internal network: never through the proxy.
+Embeddings run on the GPU, also while GAMING when the model is in `gpu_governor.keep_on_gaming` (2026-11-09);
+otherwise on the CPU (`num_gpu: 0`) while GAMING (§11), so indexing and recall keep working during games. Both are
+local services on the internal network: never through the proxy.
 """
 import logging
 from typing import Any
@@ -41,15 +42,17 @@ async def embed(texts: list[str], *, query: bool = False) -> list[list[float]]:
     if not texts:
         return []
     cfg = rag_cfg()
+    model = cfg.get("embed_model", "qwen3-embedding:0.6b")
     opts: dict[str, Any] = {"num_ctx": int(cfg.get("embed_ctx", 2048))}
-    if not await _gpu_ok():
+    keep = (config.policy().get("gpu_governor") or {}).get("keep_on_gaming") or []
+    if model not in keep and not await _gpu_ok():
         opts["num_gpu"] = 0
     inputs = [QUERY_INSTRUCT + t if query else t for t in texts]
     out: list[list[float]] = []
     batch = int(cfg.get("embed_batch", 16))
     for i in range(0, len(inputs), batch):
         r = await _http().post(f"{get_settings().ollama_url}/api/embed", json={
-            "model": cfg.get("embed_model", "qwen3-embedding:0.6b"), "input": inputs[i:i + batch],
+            "model": model, "input": inputs[i:i + batch],
             "truncate": True, "options": opts, "keep_alive": cfg.get("embed_keep_alive", "10m")})
         r.raise_for_status()
         out += r.json()["embeddings"]

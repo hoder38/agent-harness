@@ -1,0 +1,34 @@
+# Domains plan_search may put after site: (ARCHITECTURE.md §12a cite_only). Any other site: is removed in code.
+# Subdomains are allowed (python.org covers docs.python.org). Hot-reloaded: edits apply on the next turn.
+# Add a domain only when its pages answer the owner's questions well; planned: vault curation proposes new ones (§10b).
+sites:
+  # standards / research
+  - rfc-editor.org
+  - ietf.org
+  - w3.org
+  - iso.org
+  - doi.org
+  - arxiv.org
+  # government / filings
+  - law.moj.gov.tw
+  - mops.twse.com.tw
+  - sec.gov
+  # companies (official)
+  - openai.com
+  - anthropic.com
+  - apple.com
+  - google.com
+  - blog.google
+  - microsoft.com
+  - github.com
+  - github.blog
+  - python.org
+  - nvidia.com
+  # news / reference
+  - reuters.com
+  - apnews.com
+  - cna.com.tw
+  - bbc.com
+  - bloomberg.com
+  - wikipedia.org     # 2026-11-10 owner (zh./en. subdomains included)
+  - imdb.com          # 2026-11-10 owner: films, series, casts

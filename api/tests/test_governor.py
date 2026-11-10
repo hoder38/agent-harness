@@ -44,7 +44,16 @@ def test_busy_on_sustained_util_and_exits_after_calm_window():
 def test_busy_on_low_vram_but_ollama_counts_as_free():
     g = Governor(CFG)
     assert g.step(s(0, used=12.0, ollama=9.0)) == "FREE"    # 16-12+9 = 13 GB free: our own Qwen
-    assert g.step(s(1, used=12.0)) == "BUSY"                # someone else holds 12 GB
+    assert g.step(s(1, used=12.0)) == "FREE"                # someone else holds 12 GB…
+    assert g.step(s(31, used=12.0)) == "BUSY"               # …for 30 s
+
+
+def test_ollama_load_blip_in_vram_is_not_busy():
+    g = Governor(CFG)
+    assert g.step(s(0, used=9.0)) == "FREE"                 # Qwen loading, not yet in /api/ps
+    assert g.step(s(2, used=9.0)) == "FREE"
+    assert g.step(s(4, used=9.0, ollama=7.0)) == "FREE"     # listed: blip over
+    assert g.step(s(40, used=9.0, ollama=7.0)) == "FREE"
 
 
 def test_restart_in_gaming_holds_until_exit_window():
@@ -81,6 +90,18 @@ async def test_unload_skips_cpu_only_models():
 
     gone = await unload_gpu_models(Http(), [{"name": "qwen", "size_vram": 6_000_000_000}, {"name": "cpu", "size_vram": 0}])
     assert gone == ["qwen"] and posted == [{"model": "qwen", "keep_alive": 0}]
+
+
+async def test_unload_keeps_listed_models():
+    posted = []
+
+    class Http:
+        async def post(self, url, json):
+            posted.append(json)
+
+    models = [{"name": "qwen", "size_vram": 6_000_000_000}, {"name": "embed", "size_vram": 900_000_000}]
+    assert await unload_gpu_models(Http(), models, {"embed"}) == ["qwen"]
+    assert posted == [{"model": "qwen", "keep_alive": 0}]
 
 
 async def test_deferred_jobs_resume_only_when_not_gaming(redis):

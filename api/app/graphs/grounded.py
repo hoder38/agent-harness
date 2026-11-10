@@ -3,6 +3,7 @@
 Search/fetch are called by nodes (not LLM tool-calling), so per-turn budgets are enforced in code.
 Only `compose` is streamed to the user; every other LLM call is internal.
 """
+import asyncio
 import json
 import logging
 import re
@@ -255,6 +256,23 @@ def claim_terms(claims: list[Claim]) -> list[str]:
 
 
 # ---------------------------------------------------------------- graph
+_SITE = re.compile(r"(?:\bOR\s+)?\bsite:(\S+)\s*(?:\bOR\b)?", re.I)
+
+
+def site_domains() -> list[str]:
+    """Domains plan_search may put after site: (config/search_sites.yaml). New ones are added by the owner (planned:
+    vault curation proposals, §10b), never invented by the model."""
+    return auth.config.search_sites()
+
+
+def clean_query(query: str, allowed: list[str]) -> str:
+    """Keep site:<domain> only for listed domains (or their subdomains), without a path; drop any other site:."""
+    def keep(m: re.Match) -> str:
+        dom = re.sub(r"^https?://", "", m.group(1).lower()).split("/")[0]
+        return f"site:{dom} " if any(dom == a or dom.endswith("." + a) for a in allowed) else " "
+    return re.sub(r"\s+", " ", _SITE.sub(keep, query)).strip()
+
+
 def build_grounded_graph(
     llm: BaseChatModel | None,
     *,
@@ -269,7 +287,10 @@ def build_grounded_graph(
     clock: Callable[[], float] = time.time,
     max_turns: int = 20,
     summary: dict[str, Any] | None = None,
+    rewriter: BaseChatModel | None = None,
 ):
+    """`rewriter`: the local GPU model for `resolve_request` when the turn runs on a cloud tier (worker passes it
+    only while the GPU is FREE): a one-line rewrite takes ~0.7 s there vs ~4 s on cloud_fast (2026-11-10)."""
     search = search or src.search_web
     pictures = pictures or image_parts
     fetch = fetch or src.fetch_source
@@ -300,6 +321,7 @@ def build_grounded_graph(
     max_clarify = int((policy.get("clarify") or {}).get("max_rounds", 5))
     always_search_cfg = bool(g_cfg.get("always_search"))
     search_skip = set(g_cfg.get("search_skip_task_types") or ["chitchat"])
+    web_threshold = float(g_cfg.get("web_threshold", 0.0))
     search_history = int(g_cfg.get("search_history_turns", 3))
     max_claims = int(g_cfg.get("max_claims", 8))
     brave_usd = float(g_cfg.get("brave_usd_per_query", 0.0))
@@ -307,9 +329,12 @@ def build_grounded_graph(
     prices = policy.get("prices_usd_per_mtok") or {}
     local_think = set(g_cfg.get("local_think_tasks") or [])
     think_tokens = int(g_cfg.get("local_think_tokens", 2048))
+    reasoning_tokens = {k: int(v) for k, v in (g_cfg.get("reasoning_tokens") or {}).items()}
     mode = str(g_cfg.get("mode", "verify"))
     cite_pages = int(g_cfg.get("cite_pages", 2))
     cite_chars = int(g_cfg.get("cite_chars", 4000))
+    snippet_models = set(g_cfg.get("snippet_models") or [])
+    snippet_pages = int(g_cfg.get("snippet_pages", 6))
     concise = concise_rule(policy)
     cite = bool(g_cfg.get("citations", True))  # false: sources are background only, no [n] or sources list
     answer_tokens = int((policy.get("answer_style") or {}).get("max_tokens", 400)) if concise else 1500
@@ -347,13 +372,15 @@ def build_grounded_graph(
         return datetime.now(ZoneInfo("Asia/Taipei")).strftime("Current date and time: %Y-%m-%d %H:%M %Z (%A).")
 
     async def call(s: GroundedState, budget: dict, task: str, system: str, msgs: list[AnyMessage],
-                   max_tokens: int, *, final: bool = False) -> str:
-        """One LLM call with the per-turn USD/time guard; adds the actual cost to `budget`."""
-        if llm is None:
+                   max_tokens: int, *, final: bool = False, local: bool = False) -> str:
+        """One LLM call with the per-turn USD/time guard; adds the actual cost to `budget`. `local`: run this step
+        on `rewriter` (the GPU Qwen) instead of the turn's model."""
+        model, run_llm = ("local", rewriter) if local else (s.get("model", "local"), llm)
+        if run_llm is None:
             raise RuntimeError("graph built without a model (read-only)")
         if not final and not time_left(s):
             raise Exhausted("time")
-        price = prices.get(s.get("model", "local"), {"input": 0, "output": 0})
+        price = prices.get(model, {"input": 0, "output": 0})
         p_in, p_out = float(price.get("input", 0)), float(price.get("output", 0))
         est_in = (len(system) + sum(len(_text(m.content)) for m in msgs)) / 3 + IMAGE_TOKENS * sum(
             1 for m in msgs if isinstance(m.content, list) for p in m.content
@@ -366,23 +393,33 @@ def build_grounded_graph(
             raise Exhausted("usd")
         tags = ["answer"] if final else ["internal"]
         kw: dict[str, Any] = {"max_tokens": max_tokens}
-        if s.get("model", "local") in LOCAL_MODELS:
+        if model in LOCAL_MODELS:
             # Qwen3.x thinks by default and spends max_tokens on hidden reasoning: off unless listed in policy,
             # and then with extra room so the visible answer still fits.
-            if task in local_think and s.get("model") != "local_cpu":
+            if task in local_think and model != "local_cpu":
                 kw["max_tokens"] = max_tokens + think_tokens
             else:
                 kw["extra_body"] = {"think": False}
+        else:
+            kw["max_tokens"] = max_tokens + reasoning_tokens.get(model, 0)
         prompt = [SystemMessage(f"TASK: {task}\n\n{system}"), *msgs]
-        msg = await llm.bind(**kw).ainvoke(prompt, config={"tags": tags, "run_name": task})
+        msg = await run_llm.bind(**kw).ainvoke(prompt, config={"tags": tags, "run_name": task})
         um = getattr(msg, "usage_metadata", None) or {}
         budget["usd"] = round(budget["usd"] + (um.get("input_tokens", 0) * p_in + um.get("output_tokens", 0) * p_out) / 1e6, 6)
         text = _text(msg.content)
-        if "extra_body" not in kw and s.get("model", "local") in LOCAL_MODELS \
+        if "extra_body" not in kw and model in LOCAL_MODELS \
                 and not re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.S).strip():
             # Thinking used the whole token budget and left no visible answer: retry once without thinking.
-            msg = await llm.bind(max_tokens=max_tokens, extra_body={"think": False}).ainvoke(
+            msg = await run_llm.bind(max_tokens=max_tokens, extra_body={"think": False}).ainvoke(
                 prompt, config={"tags": tags, "run_name": f"{task}_nothink"})
+            text = _text(msg.content)
+        elif model not in LOCAL_MODELS and not text.strip() \
+                and (getattr(msg, "response_metadata", None) or {}).get("finish_reason") == "length":
+            # Hidden reasoning used the whole cap: retry once with double room.
+            msg = await run_llm.bind(max_tokens=kw["max_tokens"] * 2).ainvoke(
+                prompt, config={"tags": tags, "run_name": f"{task}_retry"})
+            um = getattr(msg, "usage_metadata", None) or {}
+            budget["usd"] = round(budget["usd"] + (um.get("input_tokens", 0) * p_in + um.get("output_tokens", 0) * p_out) / 1e6, 6)
             text = _text(msg.content)
         return text
 
@@ -412,87 +449,110 @@ def build_grounded_graph(
             "budget": new_budget(), "turn_started_ms": t, "clock_ms": t, "answer": None, "answer_body": "",
             "compose_round": 0, "check_failures": [], "shopping": False, "intent_answered": False,
             "answer_task_type": None, "memories": [], "kb_hits": None, "kb_query": None, "memories_query": None,
+            "lookup_query": None,
         }
+
+    def lookup_text(s: GroundedState) -> str:
+        """KB/memory query: the resolved request, or (not rewritten) the previous owner message + this one."""
+        return s.get("lookup_query") or s["question"]
 
     async def kb_lookup(s: GroundedState) -> list[dict]:
         """KB hits for the current question, searched once per question (clarifying first, then research)."""
         if s.get("task_type") in kb_skip:
             return []
-        if s.get("kb_query") == s["question"] and s.get("kb_hits") is not None:
+        q = lookup_text(s)
+        if s.get("kb_query") == q and s.get("kb_hits") is not None:
             return s["kb_hits"]
-        return await kb(s["question"], private=bool(s.get("private")))
+        return await kb(q, private=bool(s.get("private")))
 
     async def memory_lookup(s: GroundedState) -> list[dict]:
-        if s.get("memories_query") == s["question"]:
+        q = lookup_text(s)
+        if s.get("memories_query") == q:
             return s.get("memories") or []
-        return await recall(s["question"], private=bool(s.get("private")))
+        return await recall(q, private=bool(s.get("private")))
 
-    async def assess_ambiguity(s: GroundedState) -> dict[str, Any]:
+    async def resolve_request(s: GroundedState) -> dict[str, Any]:
+        """Resolve the request against earlier turns (`resolved_request`) and, only when the router flagged it
+        (force_clarify: ambiguous / unsure intent, §7 rule 3), write the one question to ask. The model never decides
+        on its own to ask (2026-11-10: its own judgement asked about things the conversation already settled)."""
         budget = dict(s["budget"])
         force = bool(s.get("force_clarify")) and budget["clarify_used"] == 0
         if s.get("skip_clarify"):
             return {}
+        history = plain_history(s["messages"], max_turns, summary)[:-1]
+        if not force and not history:
+            return {"budget": budget, "pending_ask": None}   # a first message has nothing to resolve
+        # Cloud turns rewrite on the GPU Qwen when it is free; otherwise compose (which sees the history) does
+        # without, and only the KB/memory lookups get the previous owner message for the subject.
+        on_local = s.get("model", "local") in LOCAL_MODELS
         kb_state: dict[str, Any] = {}
+        if not on_local and rewriter is None:
+            prev = next((_text(m.content) for m in reversed(history) if isinstance(m, HumanMessage)), "")
+            if prev:
+                kb_state["lookup_query"] = f"{prev[:300]}\n{s['question']}"
+                s = {**s, **kb_state}
+            if not force:
+                return {"budget": budget, "pending_ask": None, **kb_state}
         kb_note = ""
-        if mode == "cite_only":
+        if force and mode == "cite_only":
             # The owner's own documents settle what "it"/"my setup" means: don't ask what they already answer
-            # (this also overrides the router's "ambiguous" flag: the router cannot see the documents).
+            # (this overrides the router's flag: the router cannot see the documents).
             hits = await kb_lookup(s)
             mems = await memory_lookup(s)
-            kb_state = {"kb_hits": hits, "kb_query": s["question"], "memories": mems, "memories_query": s["question"]}
+            kb_state = {**kb_state, "kb_hits": hits, "kb_query": lookup_text(s), "memories": mems,
+                        "memories_query": lookup_text(s)}
             if mems:
                 kb_note += ("\nAlready known about the owner (never ask for these; answer from them):\n"
                             + "\n".join(f"- {m['text']}" for m in mems))
             if any((h.get("score") or 0) >= kb_sure for h in hits):
-                return {"budget": budget, "pending_ask": None, **kb_state}
-            if hits:
+                force = False
+                if not history:
+                    return {"budget": budget, "pending_ask": None, **kb_state}
+            elif hits:
                 kb_note += ("\nThe owner's own documents have passages that may answer this: "
                            + "; ".join(" › ".join(x for x in (h.get("title"), (h.get("heading") or "").split(" › ")[-1])
                                                  if x) for h in hits[:5])
-                           + ". If the request is about these, it is not ambiguous.")
-        history = plain_history(s["messages"], max_turns, summary)[:-1]
+                           + ". If the request is about these, the question is not needed: leave question_to_user empty.")
         sysmsg = (
-            "Decide whether to ask the user ONE more question before answering. Ask (ambiguous=true) when: the "
-            "referent is unclear (\"that one\", \"it\" with nothing before it); a missing time, region, or version "
-            "would change the answer; there are two or more plausible readings with different answers; the "
-            "constraints conflict; or, for advice, plans, recommendations, comparisons and how-to requests, a missing "
-            "detail would clearly change or personalise the answer (goal, who it is for, experience level, budget, "
-            "platform/device, constraints, preferences). Ask the single most important missing detail first; ask "
-            "again on later rounds until the answer would no longer change. Never re-ask something already answered "
-            "(including 不限/都可以/any), never ask whether to search, and do not ask for greetings, chit-chat, simple "
-            "factual lookups with one clear answer, or anything you can reasonably assume."
-            + (" The request was flagged as ambiguous by the router: ask the most useful question." if force else "")
-            + (" Answers must be very short, so also ask when the request is broad enough that a short answer "
-               "would have to guess what the owner wants (which aspect, what for)." if concise else "")
-            + "\nReply with JSON only: {\"ambiguous\": true|false, \"slot\": \"referent|scope_time|scope_region|version|"
-            "goal|conflict\", \"question_to_user\": \"one short question in the user's language\", \"options\": "
-            "[up to 3 short options], \"assumption_if_skipped\": \"the assumption you would make instead\"}" + kb_note)
+            "Rewrite the latest request as ONE standalone request that someone who has not seen the conversation "
+            "would understand: take the subject from earlier turns when the request relies on it (\"it\", \"that "
+            "mission\", \"那價格呢\", a follow-up on the same topic), and fold in the owner's answers to earlier "
+            "questions. Keep the owner's language and meaning; add nothing they did not say or clearly imply. If the "
+            "request already stands alone, repeat it unchanged."
+            + (" The router found the request unclear, so also write ONE short question for the owner about the most "
+               "important missing detail, unless the earlier turns already settle it (then leave it empty). Never ask "
+               "whether to search." if force else "")
+            + "\nReply with JSON only: {\"resolved_request\": \"the standalone request\""
+            + (", \"slot\": \"referent|scope_time|scope_region|version|goal|conflict\", \"question_to_user\": \"one "
+               "short question in the user's language, or empty\", \"options\": [up to 3 short options], "
+               "\"assumption_if_skipped\": \"the assumption you would make instead\"" if force else "")
+            + "}" + kb_note)
         try:
-            raw = await call(s, budget, "assess_ambiguity", sysmsg,
+            raw = await call(s, budget, "resolve_request", sysmsg,
                              [*history[-6:], HumanMessage(f"Latest request (with clarifications so far):\n{s['question']}")],
-                             300)
+                             300, local=not on_local and rewriter is not None)
         except Exhausted:
-            return {"budget": budget, **kb_state}
-        data = parse_json(raw) or {}
-        question = _field(data.get("question_to_user"))
-        assumption = _field(data.get("assumption_if_skipped"))
-        # A router-forced ask needs a real question: the model saying "not ambiguous" with no question (Qwen fills
-        # "null") would otherwise show "null" or a generic "tell me more" to the owner.
-        ambiguous = bool(data.get("ambiguous")) or (force and bool(question))
-        asked_before = {re.sub(r"\W+", "", str(c.get("question") or "")) for c in s.get("clarifications") or []}
-        if not ambiguous or (not force and re.sub(r"\W+", "", question) in asked_before):  # no loops
             return {"budget": budget, "pending_ask": None, **kb_state}
+        data = parse_json(raw) or {}
+        out: dict[str, Any] = {"budget": budget, "pending_ask": None, **kb_state}
+        resolved = _field(data.get("resolved_request"))
+        # Attachment text lives in the question: a rewrite would drop it.
+        if resolved and len(resolved) <= 500 and "<untrusted source=" not in s["question"]:
+            out["question"] = resolved
+        question = _field(data.get("question_to_user"))
+        if not force or not question:
+            return out
+        asked_before = {re.sub(r"\W+", "", str(c.get("question") or "")) for c in s.get("clarifications") or []}
+        if re.sub(r"\W+", "", question) in asked_before:  # no loops
+            return out
         if budget["clarify_used"] >= max_clarify:
-            return {"budget": budget, "pending_ask": None, **kb_state,
-                    "assumptions": s.get("assumptions", []) + ([assumption] if assumption else [])}
-        if not question:
-            question = ("你指的是哪一個？可以再多說一點嗎？" if lang_of(s["question"]) == "zh"
-                        else "Could you tell me a bit more about what you mean?")
+            assumption = _field(data.get("assumption_if_skipped"))
+            return {**out, "assumptions": s.get("assumptions", []) + ([assumption] if assumption else [])}
         options = [str(o).strip()[:60] for o in data.get("options") or []
                    if o is not None and str(o).strip().lower() not in ("", "null", "undefined")][:3]
-        return {"budget": budget, **kb_state, "pending_ask": {"question": question[:500], "options": options,
-                                                  "slot": str(data.get("slot") or "referent"),
-                                                  "assumption": assumption}}
+        return {**out, "pending_ask": {"question": question[:500], "options": options,
+                                       "slot": str(data.get("slot") or "referent"),
+                                       "assumption": _field(data.get("assumption_if_skipped"))}}
 
     async def ask_user(s: GroundedState) -> dict[str, Any]:
         """Write the question into the thread (so history shows it), then wait in `wait_answer`."""
@@ -568,7 +628,7 @@ def build_grounded_graph(
         return out
 
     def route_task(s: GroundedState) -> str:
-        return "shop_slots" if s.get("task_type") == "shopping" and shop_on and not s.get("private") else "assess_ambiguity"
+        return "shop_slots" if s.get("task_type") == "shopping" and shop_on and not s.get("private") else "resolve_request"
 
     def after_ingest(s: GroundedState) -> str:
         return "confirm_intent" if s.get("confirm_task") and not s.get("private") else route_task(s)
@@ -959,19 +1019,12 @@ def build_grounded_graph(
         return out
 
     async def interpretation_conflict(s: GroundedState) -> dict[str, Any]:
-        """Primary sources read the question differently → ask (within the clarify cap) or state both readings.
-        Runs before compose, so the user never gets an answer immediately followed by a question."""
-        budget = dict(s["budget"])
+        """Primary sources read the question differently → state both readings as an assumption. Never asks: only the
+        router decides when to ask (2026-11-10)."""
         conflicts = s.get("conflicts") or []
         if not conflicts:
             return {}
         readings = list(dict.fromkeys(r for c in conflicts for r in c["readings"]))[:3]
-        if budget["clarify_used"] < max_clarify and not any(c["slot"] == "conflict" for c in s.get("clarifications", [])):
-            zh = lang_of(s["question"]) == "zh"
-            q = ("一手來源對這個問題有不同的理解，你指的是哪一種？" if zh
-                 else "Primary sources read this question differently. Which one do you mean?")
-            return {"pending_ask": {"question": q, "options": readings, "slot": "conflict",
-                                    "assumption": " / ".join(readings)}, "conflicts": []}
         return {"assumptions": s.get("assumptions", []) + [" / ".join(readings)], "conflicts": []}
 
     def numbering(claims: list[Claim]) -> dict[str, int]:
@@ -1102,11 +1155,11 @@ def build_grounded_graph(
                 "messages": [AIMessage(text, id=msg_id)]}
 
     # ------------------------------------------------------------ edges
-    def after_assess(s: GroundedState) -> str:
+    def after_resolve(s: GroundedState) -> str:
         return "ask_user" if s.get("pending_ask") else "draft"
 
     def after_wait(s: GroundedState) -> str:
-        return "draft" if s.get("skip_clarify") else "assess_ambiguity"
+        return "draft" if s.get("skip_clarify") else "resolve_request"
 
     def after_claims(s: GroundedState) -> str:
         if not researchable(s):
@@ -1167,30 +1220,38 @@ def build_grounded_graph(
         kb_sure_hit = any(float(so.get("score") or 0) >= kb_sure for so in kb_sources.values())
         # About an attached file: the file is the source; the planner decides whether the web is needed too.
         always_search = always_search_cfg and not s.get("attachments")
-        if always_search and (s.get("task_type") in search_skip or kb_sure_hit):
+        needs_web = s.get("needs_web")
+        if always_search and (s.get("task_type") in search_skip or kb_sure_hit
+                              or (needs_web is not None and needs_web < web_threshold)):
             return {"budget": budget, **base}
         kb_note = ("\nThe owner's own documents already returned: "
                    + "; ".join(so["title"] for so in kb_sources.values())
                    + ". If they are enough to answer, needs_web=false.") if kb_sources and not always_search else ""
+        sites = site_domains()
         if always_search:
-            # Owner policy: always look things up (the local model's own knowledge of names, casts, links and
-            # dates was wrong too often), even for reviews, rewrites and advice about a named subject.
-            task = ("Plan a web search for the user's latest request. Always search: find facts about the subject "
-                    "(names, people, dates, plot, specifications, official pages) even when the request is creative "
-                    "writing, a review, a rewrite or advice. Give")
+            # Whether to search was decided before this call (router needs_web, task type, documents).
+            task = ("Write at most 2 web search queries for the user's latest request. Search for facts about the "
+                    "subject (names, people, dates, specifications) even when the request is a review, a rewrite or "
+                    "advice.")
+            reply = '{"entity": "subject or null", "queries": [{"query": "...", "freshness": null}]}'
         else:
             task = ("Decide whether answering the user's latest request needs a web search (facts, numbers, dates, "
                     "prices, versions, news, specifications, anything that may have changed). Greetings, creative "
-                    "writing, opinions, advice, maths and reasoning need none. If it does, give")
+                    "writing, opinions, advice, maths and reasoning need none. If it does, write at most 2 search "
+                    "queries.")
+            reply = ('{"needs_web": true|false, "entity": "subject or null", '
+                     '"queries": [{"query": "...", "freshness": null}]}')
         sysmsg = (
-            f"{now_line()}\n{task} at most "
-            f"{min(max_search, 2)} search queries that find the official / primary source (use site:<domain> when the "
-            "official domain is obvious). When unsure, search. freshness: pd|pw|pm|py for time-sensitive topics, else null.\n"
+            f"{now_line()}\n{task}\n"
+            "- Query 1: plain keywords, like a Google search, without site:.\n"
+            "- Query 2 (optional): the same keywords plus site:<domain> to reach the official source, only with a "
+            f"domain from this list: {', '.join(sites) or 'none'}. Write only the domain after site:, never a path.\n"
+            "- Use the subject's keywords only; never put a guessed answer (numbers, dates, specs) in a query.\n"
+            "- freshness: pd for weather, stock prices and today's news; pw for recent news; else null.\n"
             "The owner lives in Taiwan: for anything that depends on place (weather, prices, laws, shops, services, "
             "local news) assume Taiwan unless another place is named, and write Chinese queries in Traditional "
             "Chinese with Taiwanese terms.\n"
-            "Reply with JSON only: {\"needs_web\": true|false, \"entity\": \"subject or null\", "
-            "\"queries\": [{\"query\": \"...\", \"freshness\": null}]}" + kb_note
+            f"Reply with JSON only: {reply}" + kb_note
             + ("\nThe earlier conversation is only there to resolve what the latest request refers to (it, that, "
                "the price, 那個, 它); search for the latest request." if search_history > 0 else ""))
         # +1: the window includes the current turn, which is dropped below
@@ -1211,12 +1272,26 @@ def build_grounded_graph(
         queries = queries or [{"query": (entity or s["question"])[:200]}]
         hits: dict[str, dict] = {}
         searched = []
-        for q in queries[:max_search]:
-            if budget["search_used"] >= max_search or guard(s, budget):
-                break
-            text = str(q["query"]).strip()[:300]
-            fr = q.get("freshness") if q.get("freshness") in ("pd", "pw", "pm", "py") else None
-            res = await search(text, count=5, freshness=fr, ledger_key=f"{s.get('thread_id', '-')}:{s['turn_id']}")
+        ledger = f"{s.get('thread_id', '-')}:{s['turn_id']}"
+        planned = [] if guard(s, budget) else queries[:max(0, max_search - budget["search_used"])]
+        planned = [(clean_query(str(q["query"]), sites)[:300],
+                    q.get("freshness") if q.get("freshness") in ("pd", "pw", "pm", "py") else None) for q in planned]
+        planned = [(t, fr) for t, fr in planned if t]
+        if planned:
+            get_stream_writer()({"search": [t for t, _ in planned]})  # the worker shows the queries to the owner
+        # Parallel: three Brave queries take ~1 s, the same as one (2026-11-10).
+        results = list(await asyncio.gather(*(search(t, count=5, freshness=fr, ledger_key=ledger)
+                                              for t, fr in planned)))
+        # A query that found nothing is retried once without site: and freshness (too narrow), within the cap.
+        room = max_search - budget["search_used"] - len(planned)
+        retry = [i for i, ((t, fr), res) in enumerate(zip(planned, results))
+                 if not res.get("error") and not res.get("hits") and (fr or _SITE.search(t))][:max(0, room)]
+        if retry:
+            again = [(_SITE.sub("", planned[i][0]).strip(), None) for i in retry]
+            more = await asyncio.gather(*(search(t, count=5, freshness=None, ledger_key=ledger) for t, _ in again))
+            planned += again
+            results += more
+        for (text, _), res in zip(planned, results):
             err = res.get("error") or ""
             if err == "web search is not configured" or err.startswith("query contains"):
                 continue
@@ -1234,18 +1309,33 @@ def build_grounded_graph(
         ranked.sort(key=lambda x: x[:5])
         focus = [w for w in re.findall(r"[\w.+-]{3,}", s["question"])][:10] + re.findall(r"[\u3400-\u9fff]{2,6}", s["question"])[:6]
         sources: dict[str, dict] = dict(kb_sources)
-        for *_, h, tier, reason in ranked:
-            if len(sources) - len(kb_sources) >= cite_pages or budget["fetch_used"] >= max_fetch or guard(s, budget):
+        todo = [(h, tier, reason) for *_, h, tier, reason in ranked]
+        fetched: list[tuple[dict, str, str, dict]] = []
+        if s.get("model", "local") in snippet_models:
+            # Cloud chat answers from the search snippets; no page is fetched.
+            for h, tier, reason in todo[:snippet_pages]:
+                text = "\n".join(x for x in (h.get("title"), h.get("age"), h.get("snippet")) if x)
+                fetched.append((h, tier, reason, {"excerpt": text, "final_url": h["url"]}))
+            todo = []
+        # Pages are read in parallel batches (best-ranked first); a failed page is replaced from the next batch.
+        while todo and not guard(s, budget):
+            want = min(cite_pages - len(fetched), max_fetch - budget["fetch_used"], len(todo))
+            if want <= 0:
                 break
-            res = await fetch(h["url"], focus=focus + ([entity] if entity else []), max_chars=cite_chars,
-                              ledger_key=f"{s.get('thread_id', '-')}:{s['turn_id']}")
-            if not res.get("cached"):
-                budget["fetch_used"] += 1
-            if res.get("error") or not (res.get("excerpt") or "").strip():
-                continue
+            batch, todo = todo[:want], todo[want:]
+            got = await asyncio.gather(*(fetch(h["url"], focus=focus + ([entity] if entity else []),
+                                               max_chars=cite_chars, ledger_key=ledger) for h, _, _ in batch))
+            for (h, tier, reason), res in zip(batch, got):
+                if not res.get("cached"):
+                    budget["fetch_used"] += 1
+                if res.get("error") or not (res.get("excerpt") or "").strip():
+                    continue
+                final = res.get("final_url") or h["url"]
+                if auth.classify(final, entity)[0] == auth.T3:
+                    continue
+                fetched.append((h, tier, reason, res))
+        for h, tier, reason, res in fetched:
             final = res.get("final_url") or h["url"]
-            if auth.classify(final, entity)[0] == auth.T3:
-                continue
             sid = f"s{len(sources) + 1}"
             sources[sid] = {"id": sid, "url": h["url"], "final_url": final, "domain": auth.domain_of(final),
                             "title": res.get("title") or h.get("title", ""), "tier": tier, "tier_reason": reason,
@@ -1714,11 +1804,11 @@ def build_grounded_graph(
     def after_shop_slots(s: GroundedState) -> str:
         if s.get("pending_ask"):
             return "ask_user"
-        return "shop_search" if s.get("shopping") else "assess_ambiguity"
+        return "shop_search" if s.get("shopping") else "resolve_request"
 
     def add_shopping(g: StateGraph, compose_fn, check_fn, after_wait_fn, wait_targets: list[str]) -> None:
         """ingest → [confirm_intent → ask_user] → by task_type: shop_slots → (ask_user | shop_search) or
-        assess_ambiguity; compose/check dispatch on `shopping` and start the answer with the echo line."""
+        resolve_request; compose/check dispatch on `shopping` and start the answer with the echo line."""
         async def compose_any(s: GroundedState) -> dict[str, Any]:
             if line := echo_line(s):
                 get_stream_writer()({"echo": line})  # the worker streams it before the answer tokens
@@ -1731,34 +1821,34 @@ def build_grounded_graph(
         g.add_node("confirm_intent", confirm_intent)
         g.add_node("shop_slots", shop_slots)
         g.add_node("shop_search", shop_search)
-        g.add_node("assess_ambiguity", assess_ambiguity)
+        g.add_node("resolve_request", resolve_request)
         g.add_node("ask_user", ask_user)
         g.add_node("wait_answer", wait_answer)
         g.add_node(COMPOSE_NODE, compose_any)
         g.add_node("final_check", check_any)
         g.add_edge(START, "ingest")
-        g.add_conditional_edges("ingest", after_ingest, ["confirm_intent", "shop_slots", "assess_ambiguity"])
+        g.add_conditional_edges("ingest", after_ingest, ["confirm_intent", "shop_slots", "resolve_request"])
         g.add_edge("confirm_intent", "ask_user")
-        g.add_conditional_edges("shop_slots", after_shop_slots, ["ask_user", "shop_search", "assess_ambiguity"])
+        g.add_conditional_edges("shop_slots", after_shop_slots, ["ask_user", "shop_search", "resolve_request"])
         g.add_edge("ask_user", "wait_answer")
         g.add_conditional_edges("wait_answer", after_wait_any(after_wait_fn),
-                                list(dict.fromkeys(["shop_slots", "assess_ambiguity", *wait_targets])))
+                                list(dict.fromkeys(["shop_slots", "resolve_request", *wait_targets])))
         g.add_edge("shop_search", COMPOSE_NODE)
         g.add_edge(COMPOSE_NODE, "final_check")
         g.add_conditional_edges("final_check", after_check, [COMPOSE_NODE, END])
 
     if mode == "cite_only":
         g = StateGraph(GroundedState)
-        add_shopping(g, cite_compose, cite_check, lambda s: "research" if s.get("skip_clarify") else "assess_ambiguity",
-                     ["assess_ambiguity", "research"])
+        add_shopping(g, cite_compose, cite_check, lambda s: "research" if s.get("skip_clarify") else "resolve_request",
+                     ["resolve_request", "research"])
         g.add_node("research", cite_research)
-        g.add_conditional_edges("assess_ambiguity", lambda s: "ask_user" if s.get("pending_ask") else "research",
+        g.add_conditional_edges("resolve_request", lambda s: "ask_user" if s.get("pending_ask") else "research",
                                 ["ask_user", "research"])
         g.add_edge("research", COMPOSE_NODE)
         return g.compile(checkpointer=checkpointer)
 
     g = StateGraph(GroundedState)
-    add_shopping(g, compose, final_check, after_wait, ["assess_ambiguity", "draft"])
+    add_shopping(g, compose, final_check, after_wait, ["resolve_request", "draft"])
     g.add_node("draft", draft)
     g.add_node("extract_claims", mark_exhausted(extract_claims))
     g.add_node("plan_queries", plan_queries)
@@ -1768,7 +1858,7 @@ def build_grounded_graph(
     g.add_node("verify_support", mark_exhausted(verify_support))
     g.add_node("interpretation_conflict", interpretation_conflict)
 
-    g.add_conditional_edges("assess_ambiguity", after_assess, ["ask_user", "draft"])
+    g.add_conditional_edges("resolve_request", after_resolve, ["ask_user", "draft"])
     g.add_edge("draft", "extract_claims")
     g.add_conditional_edges("extract_claims", after_claims, ["plan_queries", COMPOSE_NODE])
     g.add_edge("plan_queries", "search")

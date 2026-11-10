@@ -47,6 +47,13 @@ def decide(
         locked.add("route")
         reasons.append("1: /code override → coding")
 
+    # 1a. routes switched off in policy (routes.disabled) → chat, even with /code
+    disabled = set((policy.get("routes") or {}).get("disabled") or [])
+    if route in disabled:
+        reasons.append(f"1a: route {route} disabled → chat")
+        route = "chat"
+        locked.discard("route")
+
     # 1b. private pattern/source in this message → local model for this message only (beats /cloud); its text is
     # redacted and it gets no private data, so later cloud turns cannot see anything private (§6)
     if gate0.local_only and not private:
@@ -138,7 +145,9 @@ def decide(
         if model == "cloud_strong" and "model" not in locked:
             model = "cloud_fast"
             reasons.append("6: LINE → cloud_fast (short answer)")
-        if route not in ("chat", "defer"):   # LINE is for chat and notifications only; work happens on the web
+        # LINE is for chat and notifications only; work happens on the web. A router-flagged question stays: only the
+        # router decides when to ask (2026-11-10), so turning it into chat would mean LINE never asks.
+        if route not in ("chat", "clarify", "defer"):
             reasons.append(f"6: LINE → chat (was {route})")
             route = "chat"
 
@@ -181,7 +190,7 @@ def decide(
         queue = "background"
 
     return Decision(route=route, model=model, queue=queue, risky=risky, private=private,
-                    task_type=task_type, confirm_task=confirm_task, reasons=reasons)
+                    task_type=task_type, needs_web=router.needs_web, confirm_task=confirm_task, reasons=reasons)
 
 
 def _confirm_task(router: RouterResult, th: dict[str, Any], policy: dict[str, Any], reasons: list[str]) -> list[str]:
@@ -191,6 +200,8 @@ def _confirm_task(router: RouterResult, th: dict[str, Any], policy: dict[str, An
     if not router.task_type:
         return []
     types = set((policy.get("clarify") or {}).get("confirm_task_types", ["shopping"]))
+    if not (policy.get("shopping") or {}).get("enabled", True):
+        types.discard("shopping")   # nothing to confirm: the shopping pipeline is off
     below, margin = th.get("task_confirm_below", 0.7), th.get("task_margin", 0.3)
     probs = dict(router.task_probs) or {router.task_type: router.intent_confidence}
     ranked = sorted(probs.items(), key=lambda kv: -kv[1])

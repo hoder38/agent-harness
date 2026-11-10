@@ -1,4 +1,5 @@
-"""Speech → text with faster-whisper: CUDA fp16 while the GPU is FREE, CPU int8 otherwise (§5)."""
+"""Speech → text with faster-whisper: CUDA fp16 in every GPU state (GAMING only unloads Qwen, 2026-11-10); CPU int8
+only when CUDA fails (§5)."""
 import asyncio
 import logging
 import threading
@@ -76,26 +77,26 @@ def unload(device: str | None = None) -> list[str]:
 
 
 def unload_idle(gpu_state: str) -> list[str]:
+    """Unload after `asr.keep_alive_s` idle; the GPU state no longer matters (`gpu_state` kept for callers)."""
     keep = float(common.sub("asr").get("keep_alive_s", 300))
     now = time.monotonic()
     out = []
     for d, t in list(_last_used.items()):
-        if (d == "cuda" and gpu_state != "FREE") or now - t > keep:
+        if now - t > keep:
             if not _lock.locked():
                 out += unload(d)
     return out
 
 
 async def transcribe(path: str) -> dict[str, Any]:
-    """{segments, language, duration_s, path: gpu|cpu, degraded}. GPU only while FREE; CPU is the fallback."""
-    if await common.gpu_state() == "FREE":
-        try:
-            async with common.GpuSemaphore():
-                res = await asyncio.to_thread(_run, path, "cuda")
-            return {**res, "path": "gpu", "degraded": False}
-        except Exception as e:   # no CUDA / out of VRAM / unsupported arch: the CPU path still works
-            log.warning("GPU transcription failed, using CPU: %s", e)
-            unload("cuda")
+    """{segments, language, duration_s, path: gpu|cpu, degraded}. GPU first; CPU is the fallback."""
+    try:
+        async with common.GpuSemaphore():
+            res = await asyncio.to_thread(_run, path, "cuda")
+        return {**res, "path": "gpu", "degraded": False}
+    except Exception as e:   # no CUDA / out of VRAM / unsupported arch: the CPU path still works
+        log.warning("GPU transcription failed, using CPU: %s", e)
+        unload("cuda")
     res = await asyncio.to_thread(_run, path, "cpu")
     return {**res, "path": "cpu", "degraded": False}
 

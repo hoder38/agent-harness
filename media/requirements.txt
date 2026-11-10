@@ -9,7 +9,7 @@ faster-whisper>=1.1
 nvidia-cublas-cu12
 nvidia-cudnn-cu12==9.*
 rapidocr>=3.10,<4
-onnxruntime>=1.18
+onnxruntime>=1.18                # replaced by onnxruntime-gpu in the Dockerfile
 opencc-python-reimplemented>=0.1.7
 docling>=2.30
 pypdfium2>=4

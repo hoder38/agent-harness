@@ -87,6 +87,7 @@ class GroundedState(MessagesState, total=False):
     attachments: bool                   # the turn carries extracted file content (§5): search only if needed
     images: list[str]                   # image attachment ids a cloud model also sees as pictures (§5)
     task_type: str | None               # router's (or the owner's confirmed) jev_router.TASK_TYPES key
+    needs_web: float | None             # router's needs_web score; below grounding.web_threshold = no web search
     confirm_task: list[str]             # ask the owner to pick between these task types first
     answer_task_type: str | None        # router's reading of a free-text answer to that question
     intent_answered: bool               # internal: the last wait_answer answered the task-type question
@@ -118,6 +119,7 @@ class GroundedState(MessagesState, total=False):
     kb_hits: list[dict[str, Any]] | None  # knowledge-base hits for `kb_query` (searched once, before clarifying)
     kb_query: str | None
     memories_query: str | None
+    lookup_query: str | None    # KB/memory query when resolve_request did not rewrite (previous owner message + this)
 
 
 def new_budget() -> Budget:

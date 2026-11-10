@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     policy_path: str = "/config/policy.yaml"
     privacy_rules_path: str = "/config/privacy_rules.yaml"
     authority_path: str = "/config/authority.yaml"
+    search_sites_path: str = "/config/search_sites.yaml"
 
     phoenix_collector_endpoint: str = ""   # e.g. http://phoenix:6006/v1/traces
     phoenix_project: str = "agent-harness"

@@ -49,6 +49,14 @@ def jpeg_b64(img: Image.Image, max_side: int) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _cuda_ok() -> bool:
+    try:
+        import onnxruntime as ort
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _ocr_boxes(img: Image.Image) -> list:
     global _ocr
     import numpy as np
@@ -57,8 +65,17 @@ def _ocr_boxes(img: Image.Image) -> list:
         if _ocr is None:
             from rapidocr import ModelType, OCRVersion, RapidOCR
             v = OCRVersion.PPOCRV6   # one model for Simplified, Traditional, Japanese and English (baked in the image)
-            _ocr = RapidOCR(params={"Global.log_level": "warning", "Det.ocr_version": v, "Rec.ocr_version": v,
-                                    "Det.model_type": ModelType.SMALL, "Rec.model_type": ModelType.SMALL})
+            params = {"Global.log_level": "warning", "Det.ocr_version": v, "Rec.ocr_version": v,
+                      "Det.model_type": ModelType.SMALL, "Rec.model_type": ModelType.SMALL}
+            if _cuda_ok():   # onnxruntime-gpu; also while GAMING (only Qwen leaves the GPU)
+                try:
+                    # EXHAUSTIVE/HEURISTIC conv search re-runs per input shape: 4 s per image vs 0.5 s (DEFAULT)
+                    _ocr = RapidOCR(params={**params, "EngineConfig.onnxruntime.use_cuda": True,
+                                            "EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search": "DEFAULT"})
+                except Exception as e:  # noqa: BLE001  (CUDA/cuDNN missing, out of VRAM): the CPU still works
+                    log.warning("RapidOCR on CUDA failed, using CPU: %s", e)
+            if _ocr is None:
+                _ocr = RapidOCR(params=params)
         res = _ocr(np.array(img)[:, :, ::-1])   # BGR like OpenCV
     if res.boxes is None:
         return []
@@ -155,7 +172,7 @@ async def ocr(img: Image.Image) -> str:
 
 async def caption_local(img: Image.Image, prompt: str = CAPTION_PROMPT, max_tokens: int = 500) -> str:
     m = common.cfg()
-    body = {"model": m.get("vision_model", "qwen3.5:9b"), "stream": False, "think": False, "keep_alive": "10m",
+    body = {"model": m.get("vision_model", "qwen3.5:9b"), "stream": False, "think": False, "keep_alive": -1,
             "messages": [{"role": "user", "content": prompt,
                           "images": [jpeg_b64(img, int(common.sub("image").get("max_side", 1280)))]}],
             "options": {"num_predict": max_tokens, "temperature": 0.2}}

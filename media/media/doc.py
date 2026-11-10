@@ -1,4 +1,5 @@
-"""Documents → markdown (Docling on CPU; plain PDF text for long files; OCR for scanned PDFs) (§5)."""
+"""Documents → markdown (Docling, CUDA torch via its AUTO accelerator, else CPU; plain PDF text for long files; OCR for
+scanned PDFs) (§5)."""
 import asyncio
 import logging
 import os

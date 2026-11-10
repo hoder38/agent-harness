@@ -42,6 +42,7 @@ class Governor:
         self.state = current if current in STATES else "FREE"
         self.gaming_seen: float | None = None
         self.util_high_since: float | None = None
+        self.vram_low_since: float | None = None
         self.calm_since: float | None = None
         self.reason = ""
 
@@ -68,12 +69,19 @@ class Governor:
         else:
             self.util_high_since = None
         low_vram = free_gb < self._c("busy_free_vram_gb", 8)
-        hot = self.util_high_since is not None and s.t - self.util_high_since >= self._c("busy_enter_s", 30)
-        if low_vram or hot:
-            self.reason = f"free VRAM {free_gb:.1f} GB" if low_vram else f"util {util}% for {self._c('busy_enter_s', 30):.0f}s"
+        # Sustained like util: while Ollama loads/unloads a model, /api/ps lags the real VRAM for a few seconds.
+        if low_vram:
+            self.vram_low_since = s.t if self.vram_low_since is None else self.vram_low_since
+        else:
+            self.vram_low_since = None
+        enter_s = self._c("busy_enter_s", 30)
+        vram_busy = self.vram_low_since is not None and s.t - self.vram_low_since >= enter_s
+        hot = self.util_high_since is not None and s.t - self.util_high_since >= enter_s
+        if vram_busy or hot:
+            self.reason = f"free VRAM {free_gb:.1f} GB for {enter_s:.0f}s" if vram_busy else f"util {util}% for {enter_s:.0f}s"
             self.state, self.calm_since = "BUSY", None
         elif self.state == "BUSY":
-            if util <= busy_util:
+            if util <= busy_util and not low_vram:
                 self.calm_since = s.t if self.calm_since is None else self.calm_since
                 if s.t - self.calm_since >= self._c("busy_exit_s", 120):
                     self.state, self.reason, self.calm_since = "FREE", "below BUSY thresholds", None
@@ -116,12 +124,14 @@ async def ollama_models(http: httpx.AsyncClient) -> list[dict[str, Any]]:
     return resp.json().get("models") or []
 
 
-async def unload_gpu_models(http: httpx.AsyncClient, models: list[dict[str, Any]]) -> list[str]:
-    """Free VRAM for the game. CPU-only models (local_cpu, size_vram 0) stay loaded."""
+async def unload_gpu_models(http: httpx.AsyncClient, models: list[dict[str, Any]],
+                            keep: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """Free VRAM for the game. CPU-only models (local_cpu, size_vram 0) and `keep` (gpu_governor.keep_on_gaming,
+    e.g. the embedding model) stay loaded."""
     done = []
     for m in models:
-        if int(m.get("size_vram") or 0) > 0:
-            name = m.get("name") or m.get("model")
+        name = m.get("name") or m.get("model")
+        if int(m.get("size_vram") or 0) > 0 and name not in keep:
             await http.post(f"{get_settings().ollama_url}/api/generate", json={"model": name, "keep_alive": 0})
             done.append(name)
     return done
@@ -173,7 +183,8 @@ async def main() -> None:
                 await publish(r, new, reason=f"override ({auto} measured)" if override in STATES else gov.reason,
                               override=override in STATES,
                               sample={**sample.__dict__, "auto": auto}, ttl_s=ttl)
-                if new == "GAMING" and (gone := await unload_gpu_models(http, models)):
+                if new == "GAMING" and (gone := await unload_gpu_models(
+                        http, models, set(cfg.get("keep_on_gaming") or []))):
                     log.info("unloaded from VRAM: %s", ", ".join(gone))
             except Exception as e:  # keep the last state; the missing/erroring heartbeat raises an alert
                 log.warning("governor sample failed: %s: %s", type(e).__name__, e)

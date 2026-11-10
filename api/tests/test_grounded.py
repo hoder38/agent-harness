@@ -18,6 +18,7 @@ class TaskLLM(BaseChatModel):
     script: dict
     calls: list = []
     seen: list = []
+    max_tokens: list = []
     usage: tuple = (0, 0)
 
     @property
@@ -37,6 +38,9 @@ class TaskLLM(BaseChatModel):
             out = r
         if not isinstance(out, str):
             out = json.dumps(out)
+        self.max_tokens.append(kw.get("max_tokens"))
+        if out == LENGTH:  # hidden reasoning used the whole cap
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("", response_metadata={"finish_reason": "length"}))])
         msg = AIMessage(out, usage_metadata={"input_tokens": self.usage[0], "output_tokens": self.usage[1],
                                              "total_tokens": sum(self.usage)})
         return ChatResult(generations=[ChatGeneration(message=msg)])
@@ -54,8 +58,10 @@ class TaskLLM(BaseChatModel):
             yield chunk
 
 
+LENGTH = "<finish_reason=length>"
+
 DEFAULTS = {
-    "assess_ambiguity": {"ambiguous": False},
+    "resolve_request": {"ambiguous": False},
     "draft": "Hello!",
     "extract_claims": {"claims": []},
     "classify_source": {"tier": "secondary"},
@@ -136,10 +142,10 @@ async def run(g, value, cfg=CFG):
 
 # ---------------------------------------------------------------- clarify
 async def test_ambiguous_referent_interrupts_once_and_resume_merges_answer(make):
-    g, llm, _ = make({"assess_ambiguity": [
+    g, llm, _ = make({"resolve_request": [
         {"ambiguous": True, "slot": "referent", "question_to_user": "Which phone?", "options": ["iPhone", "Pixel"]},
         {"ambiguous": False}]})
-    _, snap = await run(g, inp("how much is that one"))
+    _, snap = await run(g, inp("how much is that one", force_clarify=True))
     (it,) = snap.interrupts
     assert it.value["question"] == "Which phone?" and it.value["options"] == ["iPhone", "Pixel"]
     assert snap.values["clarifications"][0]["slot"] == "referent"
@@ -160,61 +166,65 @@ async def test_clear_greeting_needs_no_clarify_or_search(make):
 
 
 async def test_force_clarify_always_asks(make):
-    g, _, _ = make({"assess_ambiguity": {"ambiguous": False, "question_to_user": "Which one?"}})
+    g, _, _ = make({"resolve_request": {"ambiguous": False, "question_to_user": "Which one?"}})
     _, snap = await run(g, inp("that", force_clarify=True))
     assert snap.interrupts and snap.interrupts[0].value["question"] == "Which one?"
 
 
 async def test_force_clarify_without_a_real_question_does_not_ask(make):
     # Seen live 2026-11-03: Qwen filled the string "null" and the owner was asked "null".
-    g, _, _ = make({"assess_ambiguity": {"ambiguous": False, "slot": None, "question_to_user": "null",
+    g, _, _ = make({"resolve_request": {"ambiguous": False, "slot": None, "question_to_user": "null",
                                          "options": [], "assumption_if_skipped": "null"}})
     _, snap = await run(g, inp("please search first and then write the review", force_clarify=True))
     assert not snap.interrupts and snap.values["budget"]["clarify_used"] == 0
 
 
-async def test_placeholder_question_falls_back_and_null_options_dropped(make):
-    g, _, _ = make({"assess_ambiguity": {"ambiguous": True, "question_to_user": "null",
-                                         "options": [None, "null", "NA"]}})
-    _, snap = await run(g, inp("how much is that one"))
-    assert snap.interrupts[0].value["question"] == "Could you tell me a bit more about what you mean?"
+async def test_null_options_dropped(make):
+    g, _, _ = make({"resolve_request": {"question_to_user": "Which one?", "options": [None, "null", "NA"]}})
+    _, snap = await run(g, inp("how much is that one", force_clarify=True))
+    assert snap.interrupts[0].value["question"] == "Which one?"
     assert snap.interrupts[0].value["options"] == ["NA"]
 
 
-async def test_clarify_rounds_capped_then_answer_with_assumptions(make, policy):
-    n = policy["clarify"]["max_rounds"]
-    amb = [{"ambiguous": True, "question_to_user": f"Which {i}?", "assumption_if_skipped": "the latest model"}
-           for i in range(n + 2)]
-    g, _, _ = make({"assess_ambiguity": amb})
-    _, snap = await run(g, inp("it"))
-    for i in range(n):
-        assert snap.interrupts, f"round {i + 1} should ask"
-        _, snap = await run(g, Command(resume=f"answer {i}", update={"run_id": f"r{i + 2}"}))
-    assert not snap.interrupts
-    assert snap.values["budget"]["clarify_used"] == n
-    assert "the latest model" in snap.values["answer"]["text"] and "Assumptions:" in snap.values["answer"]["text"]
+async def test_only_the_router_asks_and_follow_ups_are_resolved(make):
+    # 2026-11-10: the model asked "a game walkthrough or a news story?" about a mission of the game being discussed
+    resolved = "Walkthrough for the Fight Night mission in Hitman: Absolution"
+    g, llm, _ = make({"resolve_request": {"resolved_request": resolved, "ambiguous": True,
+                                           "question_to_user": "A game or a news story?"}})
+    msgs = [HumanMessage("how many missions does Hitman: Absolution have", id="m0"),
+            AIMessage("20 missions.", id="a0"), HumanMessage("walkthrough for Fight Night", id="m1")]
+    out, snap = await run(g, {**inp(""), "messages": msgs})
+    assert not snap.interrupts and out["question"] == resolved
+    sysmsg = next(m for t, m in llm.seen if t == "resolve_request")[0].content
+    assert "question_to_user" not in sysmsg
+
+
+async def test_a_first_message_is_not_rewritten_without_the_router(make):
+    g, llm, _ = make({})
+    out, snap = await run(g, inp("it"))
+    assert not snap.interrupts and "resolve_request" not in llm.calls and out["question"] == "it"
 
 
 async def test_same_question_is_never_asked_twice(make):
-    g, _, _ = make({"assess_ambiguity": {"ambiguous": True, "question_to_user": "Which one?"}})
-    _, snap = await run(g, inp("it"))
+    g, _, _ = make({"resolve_request": {"ambiguous": True, "question_to_user": "Which one?"}})
+    _, snap = await run(g, inp("it", force_clarify=True))
     _, snap = await run(g, Command(resume="the red one", update={"run_id": "r2"}))
     assert not snap.interrupts and snap.values["budget"]["clarify_used"] == 1
 
 
 async def test_skip_uses_the_assumption(make):
-    g, _, _ = make({"assess_ambiguity": {"ambiguous": True, "question_to_user": "Which?",
+    g, _, _ = make({"resolve_request": {"ambiguous": True, "question_to_user": "Which?",
                                          "assumption_if_skipped": "the newest one"}})
-    await run(g, inp("it"))
+    await run(g, inp("it", force_clarify=True))
     out, snap = await run(g, Command(resume="/skip", update={"run_id": "r2"}))
     assert not snap.interrupts and out["assumptions"] == ["the newest one"]
 
 
 async def test_waiting_for_the_user_is_not_active_time(make):
     clock = Clock()
-    g, _, _ = make({"assess_ambiguity": [{"ambiguous": True, "question_to_user": "Which?"}, {"ambiguous": False}]},
+    g, _, _ = make({"resolve_request": [{"ambiguous": True, "question_to_user": "Which?"}, {"ambiguous": False}]},
                    clock=clock)
-    await run(g, inp("it"))
+    await run(g, inp("it", force_clarify=True))
     clock.t += 600  # 10 minutes waiting
     out, _ = await run(g, Command(resume="this one", update={"run_id": "r2"}))
     assert out["budget"]["active_ms"] < 1000
@@ -502,11 +512,57 @@ async def test_always_search_ignores_needs_web_false_but_not_chitchat(make, poli
     plan = {"needs_web": False, "entity": "Sleepers 1996 film", "queries": [{"query": "Sleepers 1996 cast imdb"}]}
     g, llm, _ = make({"plan_search": plan, "compose": "A one-liner [1]."}, web, pol=pol)
     out, _ = await run(g, inp("Sleepers\nfeedback: 星光熠熠\nwrite a review"))
-    assert web.searches and "Always search" in next(m for t, m in llm.seen if t == "plan_search")[0].content
+    prompt = next(m for t, m in llm.seen if t == "plan_search")[0].content
+    assert web.searches and "needs_web" not in prompt and "python.org" in prompt
     assert out["answer"]["verdict"] == "cited"
     g, llm, web = make({"plan_search": {"needs_web": False}, "compose": "Hi!"}, pol=pol)
     await run(g, inp("hi", task_type="chitchat"))
     assert not web.searches and "plan_search" not in llm.calls
+
+
+async def test_router_needs_web_below_threshold_skips_search_and_failed_pages_are_replaced(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "always_search": True,
+                                   "web_threshold": 0.2, "cite_pages": 2},
+           "tool_limits": {"web_search": 3, "fetch_page": 4}}
+    g, llm, web = make({"plan_search": PLAN, "compose": "Rice: rinse, 1:1.2 water."}, pol=pol)
+    await run(g, inp("怎麼煮白飯", needs_web=0.08))
+    assert not web.searches and "plan_search" not in llm.calls
+    urls = ["https://openai.com/a", "https://openai.com/b", "https://openai.com/c"]
+    web = Web(hits={"openai": urls}, pages={urls[0]: "", urls[1]: "B", urls[2]: "C"})
+    plan = {**PLAN, "queries": [{"query": "openai price"}, {"query": "openai api"}]}
+    g, llm, _ = make({"plan_search": plan, "compose": "x"}, web, pol=pol)
+    out, _ = await run(g, inp("OpenAI API 多少錢", needs_web=0.9))
+    assert web.searches == ["openai price", "openai api"]
+    assert web.fetches == urls and [so["url"] for so in out["sources"].values()] == urls[1:]
+
+
+async def test_snippet_models_answer_from_search_snippets_and_local_still_reads_pages(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "always_search": True,
+                                   "snippet_models": ["cloud_fast"], "snippet_pages": 2},
+           "tool_limits": {"web_search": 3, "fetch_page": 4}}
+    urls = ["https://openai.com/a", "https://openai.com/b", "https://openai.com/c"]
+    plan = {"queries": [{"query": "openai price"}]}
+    for model in ("cloud_fast", "local"):
+        web = Web(hits={"openai": urls}, pages={u: "PAGE " + u for u in urls})
+        g, llm, _ = make({"plan_search": plan, "compose": "x"}, web, pol=pol)
+        out, _ = await run(g, inp("OpenAI API 多少錢", model=model, needs_web=0.9))
+        prompt = next(m for t, m in llm.seen if t == "compose")[-1].content
+        if model == "cloud_fast":
+            assert not web.fetches and [so["url"] for so in out["sources"].values()] == urls[:2]
+            assert "T https://openai.com/a\ns" in prompt and "PAGE" not in prompt
+        else:
+            assert web.fetches == urls[:2] and "PAGE https://openai.com/a" in prompt
+
+
+async def test_site_is_kept_only_for_listed_domains_and_empty_narrow_queries_retry_plain(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "always_search": True},
+           "tool_limits": {"web_search": 3, "fetch_page": 4}}
+    web = Web()  # nothing found: only the narrow (site:/freshness) query is retried, within web_search 3
+    plan = {"queries": [{"query": "site:docs.python.org/3.14/whatsnew Python 3.14 news", "freshness": "pd"},
+                        {"query": "site:food.gov.tw 金針菇"}]}
+    g, _, _ = make({"plan_search": plan, "compose": "x"}, web, pol=pol)
+    await run(g, inp("Python 3.14 有什麼新功能", needs_web=0.9))
+    assert web.searches == ["site:docs.python.org Python 3.14 news", "金針菇", "Python 3.14 news"]
 
 
 async def test_local_thinking_that_leaves_no_answer_is_retried_without_thinking(make, policy):
@@ -515,6 +571,41 @@ async def test_local_thinking_that_leaves_no_answer_is_retried_without_thinking(
                       "compose": ["<think>weather... weather... (token budget ran out)", "Sunny today."]}, pol=pol)
     out, _ = await run(g, inp("今天天氣好嗎"))
     assert llm.calls.count("compose") == 2 and out["answer"]["text"].endswith("Sunny today.")
+
+
+async def test_cloud_reasoning_gets_extra_room_and_an_empty_capped_reply_is_retried(make, policy):
+    pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only", "reasoning_tokens": {"cloud_fast": 1000}},
+           "answer_style": {**policy.get("answer_style", {}), "concise": True, "max_tokens": 400}}
+    g, llm, _ = make({"plan_search": {"needs_web": False}, "compose": [LENGTH, "Sunny today."]}, pol=pol)
+    llm.max_tokens = []
+    out, _ = await run(g, inp("今天天氣好嗎", model="cloud_fast"))
+    assert llm.calls.count("compose") == 2 and out["answer"]["text"].endswith("Sunny today.")
+    assert llm.max_tokens[-2:] == [1400, 2800]
+
+
+async def test_cloud_turn_rewrites_on_the_local_rewriter_or_not_at_all(redis, policy):
+    history = [HumanMessage("Hitman Absolution 有哪些關卡", id="h0"), AIMessage("共 20 關。", id="a0")]
+    seen_kb = []
+
+    async def kb(q, private):
+        seen_kb.append(q)
+        return []
+    for with_rewriter in (True, False):
+        llm = TaskLLM(script={"plan_search": {"needs_web": False}}, calls=[], seen=[])
+        local = TaskLLM(script={"resolve_request": {"resolved_request": "Hitman Absolution Fight Night 攻略"}},
+                        calls=[], seen=[])
+        pol = {**policy, "grounding": {**policy["grounding"], "mode": "cite_only"}}
+        g = build_grounded_graph(llm, policy=pol, checkpointer=InMemorySaver(), search=Web().search,
+                                 fetch=Web().fetch, kb=kb, clock=Clock(), rewriter=local if with_rewriter else None)
+        seen_kb.clear()
+        out, _ = await run(g, {**inp("Fight Night 攻略", model="cloud_fast"),
+                               "messages": [*history, HumanMessage("Fight Night 攻略", id="m1")]},
+                           {**CFG, "configurable": {"thread_id": str(with_rewriter)}})
+        assert "resolve_request" not in llm.calls
+        if with_rewriter:
+            assert local.calls == ["resolve_request"] and seen_kb[-1] == "Hitman Absolution Fight Night 攻略"
+        else:
+            assert not local.calls and seen_kb[-1] == "Hitman Absolution 有哪些關卡\nFight Night 攻略"
 
 
 async def test_cite_only_plan_search_sees_recent_turns_for_follow_ups(cite):

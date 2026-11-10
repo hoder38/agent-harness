@@ -34,3 +34,11 @@ def privacy_rules() -> dict[str, Any]:
 
 def authority() -> dict[str, Any]:
     return load_yaml(get_settings().authority_path)
+
+
+def search_sites() -> list[str]:
+    """site: domains plan_search may use (search_sites.yaml); none when the file is missing."""
+    path = get_settings().search_sites_path
+    if not os.path.exists(path):
+        return []
+    return [str(d).strip().lower() for d in load_yaml(path).get("sites") or [] if str(d).strip()]

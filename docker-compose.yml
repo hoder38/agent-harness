@@ -194,7 +194,7 @@ services:
     image: ollama/ollama:latest
     environment:
       <<: *proxy-env                         # model pulls go through the allowlist proxy
-      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_KEEP_ALIVE: "-1"                # resident; the governor unloads the chat models on GAMING (2026-11-10)
       OLLAMA_MAX_LOADED_MODELS: "2"
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
@@ -302,14 +302,16 @@ services:
       retries: 3
       start_period: 20s
 
-  reranker:                                  # §10 bge-reranker-v2-m3 on CPU; model downloaded via squid into `hf`
+  reranker:                                  # §10 bge-reranker-v2-m3 on the GPU (fp16, ~1.2 GB; CPU fallback); model via squid into `hf`
     build: ./reranker
     image: agent-harness-reranker:latest
     environment:
       <<: *proxy-env
       RERANK_THREADS: "8"
+      RERANK_DEVICE: auto                    # cuda when available, else cpu
     volumes: [hf:/hf]
     mem_limit: 4g
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
